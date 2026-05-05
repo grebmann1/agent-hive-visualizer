@@ -1,26 +1,196 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  /* Classic Game Boy 4-color palette (used INSIDE the game canvas) */
+  --gb-darkest: #0f380f;
+  --gb-dark: #306230;
+  --gb-light: #8bac0f;
+  --gb-lightest: #9bbc0f;
+
+  /* App chrome — polished RPG UI, high contrast for readability */
+  --ink: #d5d8ff;
+  --ink-soft: #8e94bf;
+  --paper: #1c2032;
+  --paper-dim: #141827;
+  --accent: #6ee7b7;
+  --accent-dark: #22c55e;
+  --border: #2a3150;
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --color-gb-darkest: var(--gb-darkest);
+  --color-gb-dark: var(--gb-dark);
+  --color-gb-light: var(--gb-light);
+  --color-gb-lightest: var(--gb-lightest);
+  --color-ink: var(--ink);
+  --color-ink-soft: var(--ink-soft);
+  --color-paper: var(--paper);
+  --color-paper-dim: var(--paper-dim);
+  --color-accent: var(--accent);
+  --color-accent-dark: var(--accent-dark);
+  --font-pixel: var(--font-pixel);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
+html,
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: #0e1120;
+  color: var(--ink);
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica,
+    Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.pixel-font {
+  font-family: var(--font-pixel), ui-monospace, "Courier New", monospace;
+}
+
+canvas,
+.pixelated {
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  -ms-interpolation-mode: nearest-neighbor;
+}
+
+/* Parchment panel — looks like a paper card, high contrast ink */
+.panel {
+  background: var(--paper);
+  color: var(--ink);
+  border: 2px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 2px 2px 0 var(--border), 0 0 0 4px var(--paper-dim) inset;
+  padding: 8px 10px;
+  position: relative;
+}
+
+.panel-flush {
+  /* Flush frame for the game canvas. No padding, no inset highlight — the
+     canvas fills the border rectangle edge-to-edge. Keep the drop shadow
+     for the paper-card look. */
+  background: var(--paper);
+  color: var(--ink);
+  border: 2px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 2px 2px 0 var(--border);
+  padding: 0;
+  position: relative;
+  overflow: hidden;
+}
+
+.panel-dark {
+  background: var(--ink);
+  color: var(--paper);
+  border: 2px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 3px 3px 0 #0b0d16;
+  padding: 14px 16px;
+}
+
+/* Nicely chunky button — not GB green */
+.btn {
+  font-family: var(--font-pixel), ui-monospace, monospace;
+  font-size: 11px;
+  line-height: 1.4;
+  background: var(--accent);
+  color: var(--ink);
+  border: 2px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 2px 2px 0 var(--border);
+  padding: 10px 12px;
+  cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  transition: transform 0.05s linear, background 0.1s;
+  user-select: none;
+}
+.btn:hover:not(:disabled) {
+  background: #d9b86a;
+}
+.btn:active:not(:disabled) {
+  transform: translate(2px, 2px);
+  box-shadow: 0 0 0 var(--border);
+}
+.btn:disabled {
+  background: #a6a29a;
+  cursor: not-allowed;
+  opacity: 0.8;
+}
+
+.btn-primary {
+  background: var(--ink);
+  color: var(--paper);
+}
+.btn-primary:hover:not(:disabled) {
+  background: var(--ink-soft);
+}
+
+.btn-ghost {
+  background: transparent;
+  box-shadow: none;
+  border: 2px solid var(--border);
+  color: var(--ink);
+}
+.btn-ghost:hover:not(:disabled) {
+  background: var(--paper-dim);
+}
+
+/* HUD chip — shared pill for all in-canvas overlays (room label, keyboard hint,
+   zone banner, focus prompt, terminal toggle). Consistent paper/border look. */
+.hud-chip {
+  font-family: var(--font-pixel), ui-monospace, "Courier New", monospace;
+  font-size: 9px;
+  letter-spacing: 0.05em;
+  padding: 4px 8px;
+  border: 2px solid var(--border);
+  background: var(--paper);
+  border-radius: 6px;
+  box-shadow: 2px 2px 0 var(--border);
+  pointer-events: none;
+}
+.hud-chip.hud-chip-interactive {
+  pointer-events: auto;
+  cursor: pointer;
+}
+.hud-chip.hud-chip-interactive:hover {
+  background: var(--paper-dim);
+}
+
+/* Pixel scrollbar */
+.pixel-scroll::-webkit-scrollbar {
+  width: 10px;
+}
+.pixel-scroll::-webkit-scrollbar-track {
+  background: var(--paper-dim);
+  border-radius: 2px;
+}
+.pixel-scroll::-webkit-scrollbar-thumb {
+  background: var(--ink-soft);
+  border-radius: 2px;
+  border: 2px solid var(--paper-dim);
+}
+
+/* App-wide textured paper background */
+.bg-page {
+  background-color: #271d2e;
+  background-image:
+    radial-gradient(rgba(255, 255, 255, 0.05) 1px, transparent 1px),
+    radial-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+  background-size: 4px 4px, 8px 8px;
+  background-position: 0 0, 2px 2px;
+}
+
+/* Top title bar mimics an OS title strip */
+.title-strip {
+  background: linear-gradient(180deg, var(--ink) 0%, #0e1018 100%);
+  color: var(--paper);
+  border-bottom: 2px solid var(--accent-dark);
+}
+
+/* Dialog box — like a Pokemon text window but readable */
+.dialog-box {
+  background: var(--paper);
+  color: var(--ink);
+  border: 3px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  padding: 18px 20px 14px;
 }

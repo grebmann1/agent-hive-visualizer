@@ -1,0 +1,16 @@
+Kenney art packs (CC0 1.0 Universal — Public Domain)
+
+The tile art and character sprites in:
+  - public/assets/tilesets/tiny-dungeon.png
+  - public/assets/tilesets/tiny-town.png
+  - public/assets/characters/base.png
+
+are derived from Kenney's "Tiny Dungeon" and "Tiny Town" asset packs,
+released under the Creative Commons Zero (CC0 1.0) license — free for
+any use, commercial or non-commercial, with no attribution required.
+
+  Source: https://kenney.nl/assets/tiny-dungeon
+          https://kenney.nl/assets/tiny-town
+  License: https://creativecommons.org/publicdomain/zero/1.0/
+
+Crediting Kenney is not required but appreciated.

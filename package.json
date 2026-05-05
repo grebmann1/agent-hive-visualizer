@@ -1,26 +1,99 @@
 {
-  "name": "2d-agent-visualization",
+  "name": "agentquest",
+  "productName": "AgentQuest",
   "version": "0.1.0",
+  "description": "A 2D pixel-art world where every AI agent becomes a visible character. Monitors local Claude CLI processes in real time.",
+  "author": "AgentQuest",
+  "main": "electron/main.js",
   "private": true,
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
-    "lint": "eslint"
+    "dev:web": "next dev -p 3017",
+    "dev": "concurrently -k -n next,electron -c blue,magenta \"npm:dev:web\" \"wait-on http://localhost:3017 && cross-env AGENTQUEST_DEV_URL=http://localhost:3017 ELECTRON_DISABLE_SECURITY_WARNINGS=true electron .\"",
+    "build:web": "next build",
+    "start:web": "next start -p 3010",
+    "start:prod-server": "cross-env NEXT_PORT=3010 next start -p 3010",
+    "pack": "npm run build:web && electron-builder --mac --dir",
+    "dist": "npm run build:web && electron-builder --mac",
+    "lint": "eslint",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.92.0",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-web-links": "^0.12.0",
+    "@xterm/xterm": "^6.0.0",
     "next": "16.2.4",
+    "node-pty": "^1.1.0",
+    "phaser": "^4.1.0",
     "react": "19.2.4",
-    "react-dom": "19.2.4"
+    "react-dom": "19.2.4",
+    "zustand": "^5.0.12"
   },
   "devDependencies": {
+    "@electron/notarize": "^3.1.1",
+    "@electron/rebuild": "^4.0.4",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "concurrently": "^9.2.1",
+    "cross-env": "^10.1.0",
+    "electron": "^41.5.0",
+    "electron-builder": "^26.8.1",
     "eslint": "^9",
     "eslint-config-next": "16.2.4",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "typescript": "^5",
+    "wait-on": "^9.0.5"
+  },
+  "build": {
+    "appId": "com.agentquest.app",
+    "productName": "AgentQuest",
+    "afterSign": "build/notarize.js",
+    "asar": false,
+    "files": [
+      "electron/**/*",
+      "public/**/*",
+      "package.json",
+      "!**/*.map"
+    ],
+    "extraResources": [
+      {
+        "from": ".next/standalone",
+        "to": "app/.next/standalone"
+      },
+      {
+        "from": ".next/static",
+        "to": "app/.next/standalone/.next/static"
+      },
+      {
+        "from": "public",
+        "to": "app/.next/standalone/public"
+      }
+    ],
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "icon": "build/icon.icns",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ]
+    },
+    "dmg": {
+      "sign": false
+    }
   }
 }
