@@ -41,7 +41,8 @@ export type RoomId =
   | "library"
   | "tool_workshop"
   | "testing_lab"
-  | "cinema";
+  | "cinema"
+  | "meeting_room";
 
 export type AnimationId =
   | "idle"

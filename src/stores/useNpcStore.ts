@@ -2,6 +2,7 @@ import { create } from "zustand";
 import type { RoomId } from "../events/types";
 import type { NpcDef } from "../game/npcs";
 import { NPCS as STATIC_NPCS } from "../game/npcs";
+import { INTERIOR_ZONE } from "../game/zones";
 
 export interface DynamicNpc extends NpcDef {
   // Distinguish from the built-in roster
@@ -125,16 +126,16 @@ export function makeDynamicNpc(input: {
     DYNAMIC_BASE_TILES[(h >> 5) % DYNAMIC_BASE_TILES.length];
   const room = ROOM_CYCLE[h % ROOM_CYCLE.length];
   // anchor cell inside that room — picked to be walkable
+  // Use the shifted anchors from INTERIOR_ZONE so exterior rows don't
+  // offset us out of range. These coords are absolute (wrapped-layout).
   const ANCHORS: Record<RoomId, { col: number; row: number }> = {
-    desk: { col: 12, row: 3 },
-    coding_room: { col: 3, row: 3 },
-    library: { col: 18, row: 5 },
-    tool_workshop: { col: 5, row: 10 },
-    testing_lab: { col: 15, row: 11 },
-    // Cinema is only used as the "idle resting place" — not a join-spawn
-    // target. Phase 2's cinema loop picks specific seat tiles dynamically,
-    // but this fallback ensures the record is complete.
-    cinema: { col: 11, row: 19 },
+    desk: INTERIOR_ZONE.anchors.desk ?? { col: 11, row: 7 },
+    coding_room: INTERIOR_ZONE.anchors.coding_room ?? { col: 4, row: 7 },
+    library: INTERIOR_ZONE.anchors.library ?? { col: 19, row: 7 },
+    tool_workshop: INTERIOR_ZONE.anchors.tool_workshop ?? { col: 5, row: 15 },
+    testing_lab: INTERIOR_ZONE.anchors.testing_lab ?? { col: 17, row: 15 },
+    cinema: INTERIOR_ZONE.anchors.cinema ?? { col: 11, row: 22 },
+    meeting_room: INTERIOR_ZONE.anchors.meeting_room ?? { col: 13, row: 11 },
   };
   const anchor = ANCHORS[room];
 

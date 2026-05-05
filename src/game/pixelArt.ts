@@ -43,6 +43,27 @@ export const TILE = {
   //            a round bottle is the closest small decoration.
   WALL_TL: 40, // stone wall (Kenney has no distinct corners at this res)
   WALL_TR: 40, // stone wall
+  // CP5 — exterior tiles. Both use the tan FLOOR base sprite; drawMap tints
+  // them by the logical kind (grass = green, path = brown). Keeping them as
+  // separate TILE entries lets layout arrays mark intent and lets drawMap
+  // distinguish interior floors from exterior ones.
+  GRASS: 48,
+  PATH: 49,
+  TREE: 75, // the bookshelf-as-tree-trunk — stumpy but reads as vertical mass
+};
+
+// Marker ranges so drawMap can classify exterior tiles without needing a
+// separate layer. Exterior tiles use logical ids 400+ that map to real
+// sprite indices via EXTERIOR_TILE_SPRITE. We keep them >= 200 so they
+// never collide with the tiny-dungeon atlas's 0..131.
+export const EXT_GRASS = 400;
+export const EXT_PATH = 401;
+export const EXT_TREE = 402;
+
+export const EXTERIOR_TILE_SPRITE: Record<number, number> = {
+  [EXT_GRASS]: 48,
+  [EXT_PATH]: 49,
+  [EXT_TREE]: 75,
 };
 
 // 8-frame character sheet layout (128×16):

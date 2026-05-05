@@ -1,19 +1,28 @@
 import Phaser from "phaser";
-import type { AnimationId, RoomId } from "../events/types";
+import type { AgentEvent, AnimationId, RoomId } from "../events/types";
+import {
+  emojiForActivity,
+  ERROR_EMOJI,
+  IDLE_EMOJI,
+} from "../events/stateToRoom";
 import { useAgentStore } from "../stores/useAgentStore";
 import { useGameStore } from "../stores/useGameStore";
 import { buildLiveGreeting, useNpcStore } from "../stores/useNpcStore";
 import { useWorldBus } from "../stores/useWorldBus";
-import { GB, TILE_SIZE } from "./palette";
+import { GB, NEUTRAL_FLOOR_TINT, ROOM_PALETTE, TILE_SIZE } from "./palette";
 import { type NpcDef } from "./npcs";
 import { bfs } from "./pathfind";
 import {
   buildCharacterSheetFromTile,
   DEFAULT_CHARACTER_TILE,
+  EXT_PATH,
+  EXT_TREE,
+  EXTERIOR_TILE_SPRITE,
+  TILE,
   TILESET_URL,
 } from "./pixelArt";
-import { ROOM_ANCHORS } from "./rooms";
-import { INTERIOR_ZONE, isWalkableIn, type ZoneDef } from "./zones";
+import { ROOM_ANCHORS, roomIdForCell } from "./rooms";
+import { EXTERIOR_ANCHORS, INTERIOR_ZONE, isWalkableIn, type ZoneDef } from "./zones";
 import {
   type ChoreoHandle,
   type ChoreoKind,
@@ -50,14 +59,29 @@ const DRAG_THRESHOLD_PX = 4;
 const ZOOM_MIN = 0.5;
 const ZOOM_MAX = 3;
 
+/** 4-char uppercase code used in the always-on overhead pill. Prefers the
+ *  NPC's dynamic name suffix (e.g. "Claude-A4" → "A4"); falls back to the
+ *  last 4 chars of the id so the code is still stable. */
+function shortCodeFor(id: string): string {
+  const tail = id.replace(/[^A-Za-z0-9]/g, "").slice(-4);
+  return tail.toUpperCase() || "??";
+}
+
 interface Entity {
   sprite: Phaser.GameObjects.Sprite;
   shadow: Phaser.GameObjects.Rectangle;
   indicator?: Phaser.GameObjects.Text;
+  // Always-on overhead pill: a small rounded rect showing the agent's short
+  // code + an emoji reflecting the current tool or state. Re-rendered on
+  // every activity update; repositioned each frame in update().
   overheadContainer?: Phaser.GameObjects.Container;
   overheadBg?: Phaser.GameObjects.Graphics;
-  overheadText?: Phaser.GameObjects.Text;
-  overheadHideTween?: Phaser.Tweens.Tween;
+  overheadCodeText?: Phaser.GameObjects.Text;
+  overheadEmojiText?: Phaser.GameObjects.Text;
+  // Transient error flash: when a tool_result with isError arrives we swap
+  // the emoji to ❌ for 800 ms then return to this baseline.
+  overheadBaselineEmoji?: string;
+  overheadErrorUntil?: number;
   col: number;
   row: number;
   facing: Direction;
@@ -411,23 +435,63 @@ export class WorldScene extends Phaser.Scene {
   // --------------------------------------------------------------------
   private drawMap() {
     const { layout, decor, cols, rows } = this.zone;
+    // Tints for the exterior tile classes. Grass = classic pastel green,
+    // path = dusty tan-brown, tree canopy = a darker green so it stands
+    // out from the grass base.
+    const GRASS_TINT = 0x8bb04a;
+    const PATH_TINT = 0xb8956a;
+    const TREE_TINT = 0x3d6b2a;
     for (let row = 0; row < rows; row++) {
       for (let col = 0; col < cols; col++) {
         const id = layout[row][col];
-        this.add
+        // Exterior tiles: look up the real sprite index via the exterior
+        // map, then tint by class. These cells sit outside any ROOM_REGION
+        // so roomIdForCell returns null and they bypass room-tinting.
+        if (id >= 400) {
+          const spriteId = EXTERIOR_TILE_SPRITE[id] ?? TILE.FLOOR;
+          const img = this.add
+            .image(col * TILE_SIZE, row * TILE_SIZE, TILESET_KEY, spriteId)
+            .setOrigin(0, 0)
+            .setDepth(0);
+          img.setTint(id === EXT_PATH ? PATH_TINT : GRASS_TINT);
+          continue;
+        }
+        const img = this.add
           .image(col * TILE_SIZE, row * TILE_SIZE, TILESET_KEY, id)
           .setOrigin(0, 0)
           .setDepth(0);
+        if (isWalkableIn(this.zone, col, row)) {
+          const roomId = roomIdForCell(col, row);
+          const tint = roomId
+            ? ROOM_PALETTE[roomId].floor
+            : NEUTRAL_FLOOR_TINT;
+          img.setTint(tint);
+        }
       }
     }
     for (let row = 0; row < rows; row++) {
       for (let col = 0; col < cols; col++) {
         const id = decor[row][col];
         if (id === -1) continue;
-        this.add
+        // Exterior decor (trees) — look up real sprite, tint dark green,
+        // draw at sprite-row depth.
+        if (id >= 400) {
+          const spriteId = EXTERIOR_TILE_SPRITE[id] ?? TILE.FLOOR;
+          const img = this.add
+            .image(col * TILE_SIZE, row * TILE_SIZE, TILESET_KEY, spriteId)
+            .setOrigin(0, 0)
+            .setDepth(2 + row);
+          img.setTint(id === EXT_TREE ? TREE_TINT : GRASS_TINT);
+          continue;
+        }
+        const img = this.add
           .image(col * TILE_SIZE, row * TILE_SIZE, TILESET_KEY, id)
           .setOrigin(0, 0)
           .setDepth(2 + row);
+        const roomId = roomIdForCell(col, row);
+        if (roomId) {
+          img.setTint(ROOM_PALETTE[roomId].floor);
+        }
       }
     }
   }
@@ -485,13 +549,25 @@ export class WorldScene extends Phaser.Scene {
     this.ensureNpcTexture(def);
     this.ensureAnimsFor(def.id, NPC_KEY(def.id));
 
-    // Spawn position: default to the NPC's home anchor. If this NPC is a
-    // sub-agent (has parentId), override with a tile adjacent to the parent
-    // so the two read as linked.
+    // Spawn position. CP6: dynamic (non-static, non-sub-agent) NPCs enter
+    // the scene from the exterior path — SessionStart feels like an
+    // arrival. Sub-agents spawn next to their parent. Static NPCs (if any)
+    // spawn at their home anchor.
     let col = def.col;
     let row = def.row;
+    let targetCol = def.col;
+    let targetRow = def.row;
+    const isDynamic = Boolean(
+      (def as { dynamic?: boolean }).dynamic,
+    );
     const parentId =
       (def as { parentId?: string }).parentId ?? undefined;
+    if (isDynamic && !parentId) {
+      // Walk-in: start at the south entry, then queue a walk to the
+      // originally-requested room anchor.
+      col = EXTERIOR_ANCHORS.entry.col;
+      row = EXTERIOR_ANCHORS.entry.row;
+    }
     if (parentId) {
       const parent = this.npcs.get(parentId);
       if (parent) {
@@ -554,21 +630,31 @@ export class WorldScene extends Phaser.Scene {
       .setDepth(1500 + row)
       .setAlpha(0);
 
+    // Always-on overhead pill. Two Text objects (code + emoji) laid out
+    // side-by-side inside a shared rounded-rect background. Emoji uses a
+    // system font stack so platform color emoji renders natively.
     const overheadBg = this.add.graphics();
-    const overheadText = this.add
-      .text(0, 0, "", {
+    const overheadCodeText = this.add
+      .text(0, 0, shortCodeFor(def.id), {
         fontFamily: '"Press Start 2P", monospace',
         fontSize: "7px",
-        color: "#0f380f",
-        wordWrap: { width: 90 },
-        align: "center",
+        color: "#1b1e2b",
         resolution: 3,
       })
-      .setOrigin(0.5, 0.5);
+      .setOrigin(0, 0.5);
+    const overheadEmojiText = this.add
+      .text(0, 0, IDLE_EMOJI, {
+        fontFamily:
+          '"Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif',
+        fontSize: "10px",
+        color: "#1b1e2b",
+        resolution: 3,
+      })
+      .setOrigin(0, 0.5);
     const overheadContainer = this.add
-      .container(px, py - 18, [overheadBg, overheadText])
+      .container(px, py - 18, [overheadBg, overheadCodeText, overheadEmojiText])
       .setDepth(1600 + row)
-      .setAlpha(0);
+      .setAlpha(1);
 
     // Sub-agents (those with a parentId) render at 80% scale so they read
     // as visibly subordinate to their parent NPC. The spawn pop starts from
@@ -584,14 +670,20 @@ export class WorldScene extends Phaser.Scene {
       shadow,
       indicator,
       overheadBg,
-      overheadText,
+      overheadCodeText,
+      overheadEmojiText,
       overheadContainer,
+      overheadBaselineEmoji: IDLE_EMOJI,
       col,
       row,
       facing: "down",
       animKey: def.id,
       restingScale,
     });
+
+    // Paint the initial pill (resting state, idle emoji). We do this once
+    // the entry is in the map so renderPill can reach it by id.
+    this.renderPill(def.id);
 
     // Gentle spawn pop
     sprite.setScale(restingScale * 0.5);
@@ -626,8 +718,19 @@ export class WorldScene extends Phaser.Scene {
         const live = this.npcs.get(def.id);
         if (!live) return;
         this.startChoreoFor(live, pending.choreo);
-        if (pending.bubble) this.showOverheadBubble(live, pending.bubble);
+        this.updateOverheadPill(
+          def.id,
+          (pending.event.metadata as { toolName?: string } | undefined)
+            ?.toolName,
+          pending.event.state,
+          false,
+        );
       });
+    } else if (isDynamic && !parentId) {
+      // No pending activity — still walk from the exterior entry to the
+      // spawn cell so the arrival reads naturally. Target is the home
+      // cell the NPC *would* have spawned at without walk-in.
+      this.walkNpcToCell(def.id, targetCol, targetRow);
     }
   }
 
@@ -645,57 +748,138 @@ export class WorldScene extends Phaser.Scene {
     if (npc.overheadContainer) this.tweens.killTweensOf(npc.overheadContainer);
     if (npc.indicator) this.tweens.killTweensOf(npc.indicator);
 
-    // Fade-out pop
-    this.tweens.add({
-      targets: npc.sprite,
-      alpha: 0,
-      scale: 0.5,
-      duration: 200,
-      ease: "Back.easeIn",
-      onComplete: () => {
-        npc.sprite.destroy();
-        npc.shadow.destroy();
-        npc.indicator?.destroy();
-        npc.overheadContainer?.destroy();
-      },
-    });
+    // Walk-out: dynamic top-level agents (not sub-agents) walk to the
+    // exterior exit before fading. Everything else fades in place.
+    const isDynamic = Boolean(
+      (npc.def as { dynamic?: boolean }).dynamic,
+    );
+    const hasParent = Boolean((npc.def as { parentId?: string }).parentId);
+    const shouldWalkOut = isDynamic && !hasParent;
+
+    const fadeAndDestroy = () => {
+      // Re-fetch in case the NPC was already torn down.
+      if (!npc.sprite.scene) return;
+      this.tweens.add({
+        targets: npc.sprite,
+        alpha: 0,
+        scale: 0.5,
+        duration: 200,
+        ease: "Back.easeIn",
+        onComplete: () => {
+          npc.sprite.destroy();
+          npc.shadow.destroy();
+          npc.indicator?.destroy();
+          npc.overheadContainer?.destroy();
+        },
+      });
+      if (npc.overheadContainer) {
+        this.tweens.add({
+          targets: npc.overheadContainer,
+          alpha: 0,
+          duration: 200,
+          ease: "Linear",
+        });
+      }
+    };
+
+    // Detach from npcs immediately so `update()` stops pinning the pill and
+    // tick loops stop treating this as an active agent. The sprite stays
+    // until the walk-out completes (we hold `npc` in closure).
     this.npcs.delete(id);
     this.npcPaths.delete(id);
+
+    if (shouldWalkOut) {
+      // Drive the walk manually via two parallel tweens — the sprite and
+      // its shadow each tween toward the same world cell (shadow sits 7px
+      // below the sprite). We tween linearly because the BFS-based walker
+      // has already been detached from this entity.
+      const { entry: entryCell } = EXTERIOR_ANCHORS;
+      const targetX = entryCell.col * TILE_SIZE + TILE_SIZE / 2;
+      const targetY = entryCell.row * TILE_SIZE + TILE_SIZE / 2;
+      const dist = Math.hypot(targetX - npc.sprite.x, targetY - npc.sprite.y);
+      const walkMs = Math.min(2000, Math.max(400, dist * 4));
+      this.tweens.add({
+        targets: npc.sprite,
+        x: targetX,
+        y: targetY,
+        duration: walkMs,
+        ease: "Linear",
+        onComplete: fadeAndDestroy,
+      });
+      this.tweens.add({
+        targets: npc.shadow,
+        x: targetX,
+        y: targetY + 7,
+        duration: walkMs,
+        ease: "Linear",
+      });
+    } else {
+      fadeAndDestroy();
+    }
   }
 
-  private showOverheadBubble(
-    npc: Entity & { def: NpcDef; tween?: Phaser.Tweens.Tween },
-    text: string,
+  /**
+   * Set the resting emoji for an NPC's overhead pill. Pass `toolName` from
+   * the latest activity event (falls back to `state` → `stateToFace`, or
+   * idle). The pill redraws immediately.
+   *
+   * If `isError` is true, flashes to ❌ for 800 ms; after the flash the pill
+   * returns to the baseline emoji that was active when the error fired.
+   */
+  private updateOverheadPill(
+    npcId: string,
+    toolName: string | undefined,
+    state: AgentEvent["state"] | undefined,
+    isError: boolean,
   ) {
-    if (!npc.overheadContainer || !npc.overheadBg || !npc.overheadText) return;
-    if (!text) return;
-    npc.overheadText.setText(text);
-    const w = Math.max(npc.overheadText.width + 12, 50);
-    const h = npc.overheadText.height + 8;
-    npc.overheadBg.clear();
-    npc.overheadBg.fillStyle(0xffffff, 0.95);
-    npc.overheadBg.fillRoundedRect(-w / 2, -h / 2, w, h, 3);
-    npc.overheadBg.lineStyle(1, 0x1b1e2b, 1);
-    npc.overheadBg.strokeRoundedRect(-w / 2, -h / 2, w, h, 3);
+    const npc = this.npcs.get(npcId);
+    if (!npc) return;
+    const resting = emojiForActivity(toolName, state);
+    npc.overheadBaselineEmoji = resting;
+    if (isError) {
+      npc.overheadErrorUntil = this.time.now + 800;
+    }
+    this.renderPill(npcId);
+  }
 
-    // Reposition above NPC
-    npc.overheadContainer.setPosition(npc.sprite.x, npc.sprite.y - 16);
+  /**
+   * Paint the current state of the pill (bg rect + text) based on what the
+   * entity already carries. Called from updateOverheadPill and from
+   * createNpc for the first draw; the per-frame update() decays the error
+   * flash back to baseline.
+   */
+  private renderPill(npcId: string) {
+    const npc = this.npcs.get(npcId);
+    if (!npc || !npc.overheadContainer || !npc.overheadBg) return;
+    const code = npc.overheadCodeText;
+    const emoji = npc.overheadEmojiText;
+    if (!code || !emoji) return;
 
-    if (npc.overheadHideTween) npc.overheadHideTween.stop();
-    this.tweens.killTweensOf(npc.overheadContainer);
-    this.tweens.add({
-      targets: npc.overheadContainer,
-      alpha: 1,
-      y: npc.sprite.y - 20,
-      duration: 150,
-      ease: "Back.easeOut",
-    });
-    npc.overheadHideTween = this.tweens.add({
-      targets: npc.overheadContainer,
-      alpha: 0,
-      duration: 250,
-      delay: 3500,
-    });
+    const showError =
+      npc.overheadErrorUntil !== undefined &&
+      this.time.now < npc.overheadErrorUntil;
+    const activeEmoji = showError
+      ? ERROR_EMOJI
+      : npc.overheadBaselineEmoji ?? IDLE_EMOJI;
+    emoji.setText(activeEmoji);
+
+    // Lay out: [padding code · padding emoji padding]
+    const PAD_X = 4;
+    const GAP = 4;
+    const codeW = code.width;
+    const emojiW = emoji.width;
+    const innerW = codeW + GAP + emojiW;
+    const w = innerW + PAD_X * 2;
+    const h = Math.max(code.height, emoji.height) + 4;
+    code.setPosition(-w / 2 + PAD_X, 0);
+    emoji.setPosition(-w / 2 + PAD_X + codeW + GAP, 0);
+
+    const bg = npc.overheadBg;
+    bg.clear();
+    bg.fillStyle(0xffffff, 0.95);
+    bg.fillRoundedRect(-w / 2, -h / 2, w, h, 3);
+    bg.lineStyle(1, 0x1b1e2b, 1);
+    bg.strokeRoundedRect(-w / 2, -h / 2, w, h, 3);
   }
 
   // --------------------------------------------------------------------
@@ -851,7 +1035,14 @@ export class WorldScene extends Phaser.Scene {
         this.lastActivityAt.set(agentId, this.time.now);
         this.releaseSeat(agentId);
         this.walkNpcToRoom(agentId, act.room);
-        this.showOverheadBubble(npc, act.bubble);
+        const toolName = (act.event.metadata as { toolName?: string } | undefined)
+          ?.toolName;
+        const isError =
+          act.event.type === "agent.tool.result" &&
+          Boolean(
+            (act.event.metadata as { isError?: boolean } | undefined)?.isError,
+          );
+        this.updateOverheadPill(agentId, toolName, act.event.state, isError);
 
         // The behavior registry (src/game/behaviors.ts) has already resolved
         // which room to walk to and which choreography to play. We only
@@ -934,7 +1125,34 @@ export class WorldScene extends Phaser.Scene {
     this.tickNpcPaths();
     this.tickChoreoDecay();
     this.tickFollowCamera();
+    this.tickOverheadPills();
     this.drawTethers();
+  }
+
+  /** Keep the always-on overhead pill glued above its sprite every frame.
+   *  Also decays the brief ❌ error flash back to the baseline emoji. */
+  private tickOverheadPills() {
+    for (const [id, npc] of this.npcs) {
+      if (!npc.overheadContainer || !npc.sprite.scene) continue;
+      // Pin to sprite center; `-18` offsets above the head. NPCs use
+      // origin (0.5, 1) so sprite.y is the bottom — subtract half a tile
+      // to reach the head, then 18 more to clear the sprite.
+      npc.overheadContainer.setPosition(
+        npc.sprite.x,
+        npc.sprite.y - TILE_SIZE - 6,
+      );
+      // Depth has to track row-ish so sprites in lower rows draw on top
+      // of higher NPCs' pills. Using sprite.y is a fine proxy.
+      npc.overheadContainer.setDepth(1600 + npc.sprite.y);
+
+      if (
+        npc.overheadErrorUntil !== undefined &&
+        this.time.now >= npc.overheadErrorUntil
+      ) {
+        npc.overheadErrorUntil = undefined;
+        this.renderPill(id);
+      }
+    }
   }
 
   /**

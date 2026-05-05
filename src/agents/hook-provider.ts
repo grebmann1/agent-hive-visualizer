@@ -160,7 +160,8 @@ function toolToState(toolName: string | undefined):
   | "calling_tool"
   | "searching"
   | "thinking"
-  | "planning" {
+  | "planning"
+  | "talking_to_agent" {
   switch (toolName) {
     case "Read":
       return "reading_file";
@@ -178,6 +179,9 @@ function toolToState(toolName: string | undefined):
       return "searching";
     case "TodoWrite":
       return "planning";
+    case "Task":
+      // Sub-agent spawn — parent NPC heads to the Meeting Room.
+      return "talking_to_agent";
     default:
       return "thinking";
   }
