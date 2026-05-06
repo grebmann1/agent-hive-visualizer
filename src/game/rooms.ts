@@ -1,18 +1,25 @@
 // rooms.ts — labels + region rectangles + walkability shim.
-// The canonical world geometry lives in `zones.ts` (LimeZu pipeline).
+//
+// The canonical world geometry lives in `zones.ts`, which is async-loaded
+// from the Tiled `.tmj` at scene start. Until the load finishes, this
+// shim falls back to a "walkable everywhere" answer so pathfinding
+// helpers don't crash on early calls. Once `zones.ts` resolves, it
+// installs the live ZoneDef via `setActiveZone()`.
 
 import type { RoomId } from "../events/types";
-import { INTERIOR_ZONE, isWalkableIn } from "./zones";
+import type { ZoneDef } from "./zones";
+import { isWalkableIn } from "./zones";
 
-export const MAP_COLS = INTERIOR_ZONE.cols;
-export const MAP_ROWS = INTERIOR_ZONE.rows;
-export const TILE_PX = 16;
+// World tile dimensions — hardcoded to match the shipped fullMap.tmj
+// (48×32, 32×32 px). Bump these in lockstep if the map shape changes.
+export const MAP_COLS = 48;
+export const MAP_ROWS = 32;
+export const TILE_PX = 32;
 
-// New code that needs the floor/decor layers should import them
-// directly from zones.ts (`INTERIOR_ZONE.floor` / `.decor`) rather
-// than going through this file.
-export const FLOOR_LAYER = INTERIOR_ZONE.floor;
-export const DECOR_LAYER = INTERIOR_ZONE.decor;
+let activeZone: ZoneDef | null = null;
+export function setActiveZone(zone: ZoneDef): void {
+  activeZone = zone;
+}
 
 export interface RoomAnchor {
   id: RoomId;
@@ -25,70 +32,18 @@ export interface RoomAnchor {
 
 // Mixed naming scheme: cozy labels for tool-centric rooms (Library,
 // Workshop, Kitchen, Lounge) plus techy labels for meta-work rooms
-// (Control Room, Test Rig). Underlying RoomId codes stay stable so
-// event-routing + state-to-room logic is untouched.
+// (Control Room, Test Rig). Coordinates are first-pass guesses for the
+// 48×32 fullMap; refine once we eyeball the rendered map.
 export const ROOM_ANCHORS: Record<RoomId, RoomAnchor> = {
-  library: {
-    id: "library",
-    label: "Library",
-    col: INTERIOR_ZONE.anchors.library?.col ?? 5,
-    row: INTERIOR_ZONE.anchors.library?.row ?? 6,
-    labelCol: 2,
-    labelRow: 4,
-  },
-  coding_room: {
-    id: "coding_room",
-    label: "Workshop",
-    col: INTERIOR_ZONE.anchors.coding_room?.col ?? 11,
-    row: INTERIOR_ZONE.anchors.coding_room?.row ?? 6,
-    labelCol: 10,
-    labelRow: 4,
-  },
-  desk: {
-    id: "desk",
-    label: "Control Room",
-    col: INTERIOR_ZONE.anchors.desk?.col ?? 17,
-    row: INTERIOR_ZONE.anchors.desk?.row ?? 6,
-    labelCol: 14,
-    labelRow: 4,
-  },
-  cinema: {
-    id: "cinema",
-    label: "Lounge",
-    col: INTERIOR_ZONE.anchors.cinema?.col ?? 25,
-    row: INTERIOR_ZONE.anchors.cinema?.row ?? 6,
-    labelCol: 22,
-    labelRow: 4,
-  },
-  tool_workshop: {
-    id: "tool_workshop",
-    label: "Kitchen",
-    col: INTERIOR_ZONE.anchors.tool_workshop?.col ?? 5,
-    row: INTERIOR_ZONE.anchors.tool_workshop?.row ?? 16,
-    labelCol: 2,
-    labelRow: 13,
-  },
-  meeting_room: {
-    id: "meeting_room",
-    label: "Meeting Room",
-    col: INTERIOR_ZONE.anchors.meeting_room?.col ?? 11,
-    row: INTERIOR_ZONE.anchors.meeting_room?.row ?? 16,
-    labelCol: 10,
-    labelRow: 13,
-  },
-  testing_lab: {
-    id: "testing_lab",
-    label: "Test Rig",
-    col: INTERIOR_ZONE.anchors.testing_lab?.col ?? 17,
-    row: INTERIOR_ZONE.anchors.testing_lab?.row ?? 16,
-    labelCol: 14,
-    labelRow: 13,
-  },
+  library:       { id: "library",       label: "Library",      col: 8,  row: 8,  labelCol: 4,  labelRow: 5  },
+  coding_room:   { id: "coding_room",   label: "Workshop",     col: 18, row: 8,  labelCol: 14, labelRow: 5  },
+  desk:          { id: "desk",          label: "Control Room", col: 28, row: 8,  labelCol: 24, labelRow: 5  },
+  cinema:        { id: "cinema",        label: "Lounge",       col: 38, row: 8,  labelCol: 34, labelRow: 5  },
+  tool_workshop: { id: "tool_workshop", label: "Kitchen",      col: 8,  row: 22, labelCol: 4,  labelRow: 19 },
+  meeting_room:  { id: "meeting_room",  label: "Meeting Room", col: 18, row: 22, labelCol: 14, labelRow: 19 },
+  testing_lab:   { id: "testing_lab",   label: "Test Rig",     col: 28, row: 22, labelCol: 24, labelRow: 19 },
 };
 
-// Room regions used by overhead UI (room labels, hit-zones for chips).
-// Inclusive bounds in tile coordinates of the full map. Match the
-// regions in zones.ts so the floor renderer agrees with the labeller.
 export interface RoomRegion {
   id: RoomId;
   colMin: number;
@@ -97,14 +52,16 @@ export interface RoomRegion {
   rowMax: number;
 }
 
+// First-pass region rectangles for the new map. Adjust once the map's
+// layout is set in stone.
 export const ROOM_REGIONS: RoomRegion[] = [
-  { id: "library",       colMin: 2,  colMax: 9,  rowMin: 4,  rowMax: 9  },
-  { id: "coding_room",   colMin: 10, colMax: 13, rowMin: 4,  rowMax: 9  },
-  { id: "desk",          colMin: 14, colMax: 21, rowMin: 4,  rowMax: 9  },
-  { id: "cinema",        colMin: 22, colMax: 29, rowMin: 4,  rowMax: 9  },
-  { id: "tool_workshop", colMin: 2,  colMax: 9,  rowMin: 13, rowMax: 18 },
-  { id: "meeting_room",  colMin: 10, colMax: 13, rowMin: 13, rowMax: 18 },
-  { id: "testing_lab",   colMin: 14, colMax: 21, rowMin: 13, rowMax: 18 },
+  { id: "library",       colMin: 4,  colMax: 12, rowMin: 5,  rowMax: 12 },
+  { id: "coding_room",   colMin: 14, colMax: 22, rowMin: 5,  rowMax: 12 },
+  { id: "desk",          colMin: 24, colMax: 32, rowMin: 5,  rowMax: 12 },
+  { id: "cinema",        colMin: 34, colMax: 44, rowMin: 5,  rowMax: 12 },
+  { id: "tool_workshop", colMin: 4,  colMax: 12, rowMin: 19, rowMax: 26 },
+  { id: "meeting_room",  colMin: 14, colMax: 22, rowMin: 19, rowMax: 26 },
+  { id: "testing_lab",   colMin: 24, colMax: 32, rowMin: 19, rowMax: 26 },
 ];
 
 export function roomIdForCell(col: number, row: number): RoomId | null {
@@ -117,5 +74,12 @@ export function roomIdForCell(col: number, row: number): RoomId | null {
 }
 
 export function isWalkable(col: number, row: number): boolean {
-  return isWalkableIn(INTERIOR_ZONE, col, row);
+  if (!activeZone) {
+    // Map hasn't loaded yet. Treat in-bounds cells as walkable so any
+    // queued pathfind call returns *something* sensible. Out-of-bounds
+    // is always blocked.
+    if (col < 0 || col >= MAP_COLS || row < 0 || row >= MAP_ROWS) return false;
+    return true;
+  }
+  return isWalkableIn(activeZone, col, row);
 }

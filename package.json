@@ -15,8 +15,7 @@
     "pack": "npm run build:web && electron-builder --mac --dir",
     "dist": "npm run build:web && electron-builder --mac",
     "lint": "eslint",
-    "typecheck": "tsc --noEmit",
-    "prepare-assets": "node scripts/prepare-assets.mjs"
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.92.0",

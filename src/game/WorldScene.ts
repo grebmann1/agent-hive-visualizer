@@ -16,9 +16,14 @@ import {
   buildCharacterSheetFromTile,
   DEFAULT_CHARACTER_TILE,
 } from "./pixelArt";
-import { preloadAtlases, drawSlice } from "./atlas";
 import { ROOM_ANCHORS } from "./rooms";
-import { EXTERIOR_ANCHORS, INTERIOR_ZONE, isWalkableIn, type ZoneDef } from "./zones";
+import {
+  EXTERIOR_ANCHORS,
+  isWalkableIn,
+  loadInteriorZone,
+  type ZoneDef,
+} from "./zones";
+import { resolveGid } from "./tiled-loader";
 import {
   type ChoreoHandle,
   type ChoreoKind,
@@ -158,16 +163,12 @@ export class WorldScene extends Phaser.Scene {
   }
 
   preload() {
-    // LimeZu pipeline: load every atlas in the manifest. Each atlas is a
-    // 16×16 spritesheet; preloadAtlases reads grid dims from the manifest
-    // and registers a Phaser texture per atlas key.
-    preloadAtlases(this);
-    // Kenney Tiny Dungeon tilesheet — kept ONLY as the source for
-    // procedural character sprites until CP8 swaps in LimeZu's premade
-    // character sheets. Once that swap lands, this load goes away.
+    // Kenney Tiny Dungeon tilesheet — source for procedural character
+    // sprites. Frame size is 16x16 (Kenney native), independent of the
+    // world TILE_SIZE; we scale NPC sprites at render time.
     this.load.spritesheet(TILESET_KEY, "/assets/tilesets/tiny-dungeon.png", {
-      frameWidth: TILE_SIZE,
-      frameHeight: TILE_SIZE,
+      frameWidth: 16,
+      frameHeight: 16,
     });
   }
 
@@ -187,10 +188,13 @@ export class WorldScene extends Phaser.Scene {
       .get(TILESET_KEY)
       .getSourceImage() as HTMLImageElement;
     const canvas = buildCharacterSheetFromTile(tilemap, baseTile, tint);
+    // Character sheet is 8 frames × 16x16 native pixels (Kenney). The
+    // world's TILE_SIZE is 32 — sprites are scaled up at render time
+    // to match the new tile cadence.
     this.textures.addSpriteSheet(
       key,
       canvas as unknown as HTMLImageElement,
-      { frameWidth: TILE_SIZE, frameHeight: TILE_SIZE },
+      { frameWidth: 16, frameHeight: 16 },
     );
   }
 
@@ -202,25 +206,43 @@ export class WorldScene extends Phaser.Scene {
     );
   }
 
-  create() {
-    this.zone = INTERIOR_ZONE;
-
+  async create() {
     // Stop the canvas from ever showing the browser's native right-click
-    // menu. We handle right-click entirely in React (see GameCanvasInner)
-    // to show our own pixel-art context menu.
+    // menu. We handle right-click entirely in React (see GameCanvasInner).
     this.input.mouse?.disableContextMenu();
-
     this.cameras.main.setBackgroundColor(GB.lightest);
-    // Expand the camera bounds well beyond the map itself so the player
-    // can always scroll the factory into the middle of the viewport,
-    // regardless of panel size or zoom. Without this padding Phaser
-    // clamps scrollX/Y to 0 whenever the viewport is wider than the map
-    // — which pins the floor to the top-left of the panel.
+    this.cameras.main.roundPixels = true;
+
+    // Async-load the Tiled `.tmj`, queue its tileset PNGs into Phaser's
+    // loader, kick off a second load pass, then render once everything
+    // is in memory. Phaser supports nested loads as long as we wait on
+    // the LOADER_COMPLETE event.
+    const bundle = await loadInteriorZone();
+    this.zone = bundle.zone;
+
+    // Queue the tileset PNGs as Phaser spritesheets. Each tileset uses
+    // its own grid dimensions (the Tiled file says 32x32 globally; this
+    // matches our TILE_SIZE).
+    for (const ts of this.zone.tilesets) {
+      if (this.textures.exists(ts.key)) continue;
+      this.load.spritesheet(ts.key, ts.imageUrl, {
+        frameWidth: ts.tileWidth,
+        frameHeight: ts.tileHeight,
+      });
+    }
+    if (this.load.list.size > 0) {
+      await new Promise<void>((resolve) => {
+        this.load.once(Phaser.Loader.Events.COMPLETE, () => resolve());
+        this.load.start();
+      });
+    }
+
+    // Camera bounds with a full-map-size pad on each side so the
+    // building can always be centered no matter the viewport.
     const mapW = this.zone.cols * TILE_SIZE;
     const mapH = this.zone.rows * TILE_SIZE;
-    const pad = Math.max(mapW, mapH); // one full map-size of slack on each side
+    const pad = Math.max(mapW, mapH);
     this.cameras.main.setBounds(-pad, -pad, mapW + pad * 2, mapH + pad * 2);
-    this.cameras.main.roundPixels = true;
 
     for (const npc of useNpcStore.getState().staticNpcs) {
       this.ensureNpcTexture(npc);
@@ -434,40 +456,20 @@ export class WorldScene extends Phaser.Scene {
   // map rendering
   // --------------------------------------------------------------------
   private drawMap() {
-    const { floor, decor, cols, rows } = this.zone;
-    const GRASS_FILL = 0x8bb04a;
-
-    // Pass 1 — floor + walls. null cells are exterior grass; we paint a
-    // flat-color rectangle for those (LimeZu Modern Interiors does not
-    // ship grass tiles). Walls and room floors come from AtlasSlice.
+    const { gids, cols, rows, tilesets } = this.zone;
+    // Single tile layer: walk row-major, decode each gid → (tileset key,
+    // frame), draw at depth 0. Empty cells (gid 0) skip — Phaser's clear
+    // background handles those.
     for (let row = 0; row < rows; row++) {
       for (let col = 0; col < cols; col++) {
-        const slice = floor[row][col];
-        if (!slice) {
-          this.add
-            .rectangle(
-              col * TILE_SIZE,
-              row * TILE_SIZE,
-              TILE_SIZE,
-              TILE_SIZE,
-              GRASS_FILL,
-              1,
-            )
-            .setOrigin(0, 0)
-            .setDepth(0);
-          continue;
-        }
-        drawSlice(this, slice, col * TILE_SIZE, row * TILE_SIZE, 0);
-      }
-    }
-
-    // Pass 2 — decor. Drawn at depth 2+row so lower-row sprites overlap
-    // higher-row ones, which gives the cheap fake-isometric stacking.
-    for (let row = 0; row < rows; row++) {
-      for (let col = 0; col < cols; col++) {
-        const slice = decor[row][col];
-        if (!slice) continue;
-        drawSlice(this, slice, col * TILE_SIZE, row * TILE_SIZE, 2 + row);
+        const gid = gids[row * cols + col];
+        if (!gid) continue;
+        const resolved = resolveGid(gid, tilesets);
+        if (!resolved) continue;
+        this.add
+          .image(col * TILE_SIZE, row * TILE_SIZE, resolved.key, resolved.frame)
+          .setOrigin(0, 0)
+          .setDepth(0);
       }
     }
   }
@@ -638,7 +640,10 @@ export class WorldScene extends Phaser.Scene {
     const isSubAgent = Boolean(
       (def as { parentId?: string }).parentId,
     );
-    const restingScale = isSubAgent ? 0.8 : 1;
+    // World tiles are 32px; Kenney character sprites are 16px native.
+    // Default scale is 2 so a sprite occupies a full tile. Sub-agents
+    // shrink to 1.6 (was 0.8 in 16px-tile world) to read as smaller.
+    const restingScale = isSubAgent ? 1.6 : 2;
 
     this.npcs.set(def.id, {
       def,
@@ -1423,7 +1428,9 @@ export class WorldScene extends Phaser.Scene {
 
     const sprite = this.add
       .sprite(spawnPx, spawnPy, helperKey, 0)
-      .setScale(0.75)
+      // Helper at 1.5x — half of normal sub-agent scale (1.6) ish, keeps
+      // it visibly subordinate. Tied to the 32px-tile world.
+      .setScale(1.5)
       .setDepth(entity.sprite.depth - 1);
 
     // Floating emoji above the helper — scroll.
