@@ -75,6 +75,32 @@ export async function loadInteriorZone(): Promise<InteriorZoneBundle> {
   }
   // Refresh exterior anchor to a walkable cell near the south edge.
   setExteriorAnchors(pickExteriorAnchor(parsed));
+
+  // Reachability check: warn (in dev) for any room whose anchor isn't
+  // in the same connected component as the entry. Tiled-side fix: cut
+  // a 1-cell gap in the Collision wall between the corridor and that
+  // room.
+  if (typeof window !== "undefined") {
+    const components = floodComponents(parsed);
+    const entryId = components.componentIdAt(
+      EXTERIOR_ANCHORS.entry.col,
+      EXTERIOR_ANCHORS.entry.row,
+    );
+    const unreachable: string[] = [];
+    for (const room of parsed.rooms) {
+      const id = components.componentIdAt(room.anchor.col, room.anchor.row);
+      if (id === null || id !== entryId) {
+        unreachable.push(`${room.label} (${room.anchor.col},${room.anchor.row})`);
+      }
+    }
+    if (unreachable.length > 0) {
+      console.warn(
+        `[zones] ${unreachable.length} rooms unreachable from entry — agents will stay where they spawn.\n` +
+          `  Cut a 1-cell gap in the Collision layer between the corridor and:\n` +
+          unreachable.map((r) => `    • ${r}`).join("\n"),
+      );
+    }
+  }
   const zone: ZoneDef = {
     id: "interior",
     name: "Agent Ops",
@@ -100,20 +126,98 @@ function pickExteriorAnchor(parsed: {
   rows: number;
   blocking: boolean[][];
 }): { entry: { col: number; row: number }; exit: { col: number; row: number } } {
-  // Walk the bottom row left→right looking for the first walkable cell;
-  // fall back to col 24 if everything's blocked.
+  // Pick the bottom-row cell that connects to the largest walkable
+  // component — that's where the most of the map is reachable from,
+  // so dynamic NPCs spawn somewhere they can actually walk to rooms.
   const bottomRow = parsed.rows - 1;
+  const components = floodComponents(parsed);
+  let best: { col: number; size: number } | null = null;
   for (let c = 0; c < parsed.cols; c++) {
-    if (!parsed.blocking[bottomRow][c]) {
-      return {
-        entry: { col: c, row: bottomRow },
-        exit: { col: c, row: bottomRow },
-      };
+    if (parsed.blocking[bottomRow][c]) continue;
+    const compSize = components.sizeOf(c, bottomRow);
+    if (!best || compSize > best.size) best = { col: c, size: compSize };
+  }
+  if (best) {
+    return {
+      entry: { col: best.col, row: bottomRow },
+      exit: { col: best.col, row: bottomRow },
+    };
+  }
+  return {
+    entry: { col: Math.floor(parsed.cols / 2), row: bottomRow },
+    exit: { col: Math.floor(parsed.cols / 2), row: bottomRow },
+  };
+}
+
+interface ComponentIndex {
+  sizeOf: (col: number, row: number) => number;
+  largestComponent: () => Set<number>;
+  componentSizes: () => Map<number, number>;
+  componentIdAt: (col: number, row: number) => number | null;
+}
+
+function floodComponents(parsed: {
+  cols: number;
+  rows: number;
+  blocking: boolean[][];
+}): ComponentIndex {
+  const W = parsed.cols;
+  const H = parsed.rows;
+  const ids = new Int32Array(W * H).fill(-1);
+  const sizes = new Map<number, number>();
+  let next = 0;
+  for (let r = 0; r < H; r++) {
+    for (let c = 0; c < W; c++) {
+      if (ids[r * W + c] !== -1 || parsed.blocking[r][c]) continue;
+      const id = next++;
+      const stack: Array<[number, number]> = [[c, r]];
+      ids[r * W + c] = id;
+      let count = 0;
+      while (stack.length) {
+        const [cc, cr] = stack.pop()!;
+        count++;
+        for (const [dc, dr] of [
+          [1, 0],
+          [-1, 0],
+          [0, 1],
+          [0, -1],
+        ] as const) {
+          const nc = cc + dc;
+          const nr = cr + dr;
+          if (nc < 0 || nc >= W || nr < 0 || nr >= H) continue;
+          if (ids[nr * W + nc] !== -1) continue;
+          if (parsed.blocking[nr][nc]) continue;
+          ids[nr * W + nc] = id;
+          stack.push([nc, nr]);
+        }
+      }
+      sizes.set(id, count);
     }
   }
   return {
-    entry: { col: 24, row: bottomRow },
-    exit: { col: 24, row: bottomRow },
+    sizeOf: (col, row) => {
+      const id = ids[row * W + col];
+      return id === -1 ? 0 : sizes.get(id) ?? 0;
+    },
+    componentIdAt: (col, row) => {
+      const id = ids[row * W + col];
+      return id === -1 ? null : id;
+    },
+    largestComponent: () => {
+      let bestId = -1;
+      let bestSize = 0;
+      for (const [id, sz] of sizes) {
+        if (sz > bestSize) {
+          bestSize = sz;
+          bestId = id;
+        }
+      }
+      const out = new Set<number>();
+      if (bestId === -1) return out;
+      for (let i = 0; i < ids.length; i++) if (ids[i] === bestId) out.add(i);
+      return out;
+    },
+    componentSizes: () => sizes,
   };
 }
 
