@@ -83,6 +83,9 @@ function readAgentConfig() {
     authToken,
     model,
     extraHeaders,
+    // Per-request output budget. Bumped from the 4096 default because
+    // tool-use rounds can run long when Claude paints many cells.
+    maxOutputTokens: numEnv("LLM_MAX_OUTPUT_TOKENS", 8192),
     maxSteps: numEnv("AGENTQUEST_AGENT_MAX_STEPS", MAX_STEPS),
     maxInputTokens: numEnv("AGENTQUEST_AGENT_MAX_INPUT_TOKENS", MAX_INPUT_TOKENS),
     wallClockMs: numEnv("AGENTQUEST_AGENT_WALL_CLOCK_MS", WALL_CLOCK_MS),
@@ -220,7 +223,7 @@ async function runAgent(
     let resp: MessagesResponse;
     try {
       resp = await bedrockMessages(cfg, {
-        max_tokens: 4096,
+        max_tokens: cfg.maxOutputTokens,
         system: systemPrompt,
         tools,
         messages,
@@ -241,6 +244,21 @@ async function runAgent(
       }
     }
 
+    const hasToolUse = resp.content.some((b) => b.type === "tool_use");
+
+    // max_tokens stop_reason: Claude ran out of output budget. If it
+    // already produced tool_use blocks, run them and continue — Claude
+    // will pick up where it left off on the next round. If it produced
+    // only text and ran out, surface a clear error and stop.
+    if (resp.stop_reason === "max_tokens" && !hasToolUse) {
+      send({
+        type: "error",
+        message:
+          "Claude hit max_tokens without producing a tool call. Increase LLM_MAX_OUTPUT_TOKENS or shorten the prompt.",
+      });
+      return;
+    }
+
     if (resp.stop_reason === "end_turn") {
       send({
         type: "done",
@@ -249,7 +267,8 @@ async function runAgent(
       return;
     }
 
-    if (resp.stop_reason !== "tool_use") {
+    // tool_use OR (max_tokens with tool_use) — both proceed to run tools.
+    if (resp.stop_reason !== "tool_use" && resp.stop_reason !== "max_tokens") {
       send({
         type: "error",
         message: `unexpected stop_reason: ${resp.stop_reason}`,
@@ -670,6 +689,10 @@ ${tileNames.join(", ")}
 
 Use listTiles("FLOOR_") etc. to see each tile's atlas/coords if useful.
 
-Be DECISIVE — favor fillRect over many placeTile calls. Aim to complete
-in <15 tool calls. Don't get stuck inspecting; plan once, paint, commit.`;
+BE DECISIVE — favor fillRect over many placeTile calls. Aim to complete
+in <15 tool calls. Don't get stuck inspecting; plan once, paint, commit.
+
+OUTPUT BUDGET: each turn has a hard max-tokens cap. Avoid long preambles.
+After getMap() once at the start, don't re-read the map between every
+change — paint several batches, then verify near the end if needed.`;
 }
