@@ -1,0 +1,361 @@
+{
+  "generatedAt": "2026-05-06T13:33:43.546Z",
+  "tileSize": 16,
+  "publicPathPrefix": "/assets/limezu",
+  "atlases": [
+    {
+      "key": "rb_walls",
+      "file": "rb_walls.png",
+      "cols": 32,
+      "rows": 40,
+      "tileSize": 16,
+      "pixelWidth": 512,
+      "pixelHeight": 640,
+      "sourcePath": "1_Interiors/16x16/Room_Builder_subfiles/Room_Builder_Walls_16x16.png",
+      "purpose": "walls (32x40) — color variants for vertical/horizontal"
+    },
+    {
+      "key": "rb_floors",
+      "file": "rb_floors.png",
+      "cols": 15,
+      "rows": 40,
+      "tileSize": 16,
+      "pixelWidth": 240,
+      "pixelHeight": 640,
+      "sourcePath": "1_Interiors/16x16/Room_Builder_subfiles/Room_Builder_Floors_16x16.png",
+      "purpose": "floor patterns (15x40) — wood, tile, carpet, concrete"
+    },
+    {
+      "key": "rb_arches",
+      "file": "rb_arches.png",
+      "cols": 10,
+      "rows": 32,
+      "tileSize": 16,
+      "pixelWidth": 160,
+      "pixelHeight": 520,
+      "sourcePath": "1_Interiors/16x16/Room_Builder_subfiles/Room_Builder_Arched_Entryways_16x16.png",
+      "purpose": "arched doorways — color variants"
+    },
+    {
+      "key": "rb_paths",
+      "file": "rb_paths.png",
+      "cols": 42,
+      "rows": 12,
+      "tileSize": 16,
+      "pixelWidth": 672,
+      "pixelHeight": 192,
+      "sourcePath": "1_Interiors/16x16/Room_Builder_subfiles/Room_Builder_Floor_Paths_16x16.png",
+      "purpose": "exterior dirt/stone path tiles"
+    },
+    {
+      "key": "rb_connectors",
+      "file": "rb_connectors.png",
+      "cols": 7,
+      "rows": 36,
+      "tileSize": 16,
+      "pixelWidth": 112,
+      "pixelHeight": 576,
+      "sourcePath": "1_Interiors/16x16/Room_Builder_subfiles/Room_Builder_Floor_Connectors_16x16.png",
+      "purpose": "floor edge transitions between rooms"
+    },
+    {
+      "key": "theme_generic",
+      "file": "theme_generic.png",
+      "cols": 16,
+      "rows": 78,
+      "tileSize": 16,
+      "pixelWidth": 256,
+      "pixelHeight": 1248,
+      "sourcePath": "1_Interiors/16x16/Theme_Sorter/1_Generic_16x16.png",
+      "purpose": "generic furniture (desks, shelves, plants)"
+    },
+    {
+      "key": "theme_livingroom",
+      "file": "theme_livingroom.png",
+      "cols": 16,
+      "rows": 45,
+      "tileSize": 16,
+      "pixelWidth": 256,
+      "pixelHeight": 720,
+      "sourcePath": "1_Interiors/16x16/Theme_Sorter/2_LivingRoom_16x16.png",
+      "purpose": "couches, TVs, rugs — used for Lounge"
+    },
+    {
+      "key": "theme_library",
+      "file": "theme_library.png",
+      "cols": 16,
+      "rows": 34,
+      "tileSize": 16,
+      "pixelWidth": 256,
+      "pixelHeight": 544,
+      "sourcePath": "1_Interiors/16x16/Theme_Sorter/5_Classroom_and_library_16x16.png",
+      "purpose": "bookshelves, blackboards — Library room"
+    },
+    {
+      "key": "theme_kitchen",
+      "file": "theme_kitchen.png",
+      "cols": 16,
+      "rows": 49,
+      "tileSize": 16,
+      "pixelWidth": 256,
+      "pixelHeight": 784,
+      "sourcePath": "1_Interiors/16x16/Theme_Sorter/12_Kitchen_16x16.png",
+      "purpose": "fridges, stoves, counters — Kitchen room"
+    },
+    {
+      "key": "theme_conference",
+      "file": "theme_conference.png",
+      "cols": 16,
+      "rows": 12,
+      "tileSize": 16,
+      "pixelWidth": 256,
+      "pixelHeight": 192,
+      "sourcePath": "1_Interiors/16x16/Theme_Sorter/13_Conference_Hall_16x16.png",
+      "purpose": "round tables, conference chairs — Meeting Room"
+    },
+    {
+      "key": "theme_hospital",
+      "file": "theme_hospital.png",
+      "cols": 16,
+      "rows": 110,
+      "tileSize": 16,
+      "pixelWidth": 256,
+      "pixelHeight": 1760,
+      "sourcePath": "1_Interiors/16x16/Theme_Sorter/19_Hospital_16x16.png",
+      "purpose": "lab/medical machines — Test Rig stand-in"
+    },
+    {
+      "key": "office_main",
+      "file": "office_main.png",
+      "cols": 16,
+      "rows": 53,
+      "tileSize": 16,
+      "pixelWidth": 256,
+      "pixelHeight": 848,
+      "sourcePath": "Modern_Office_16x16.png",
+      "purpose": "office desks, monitors, chairs — Workshop + Control Room"
+    }
+  ],
+  "characters": [
+    {
+      "key": "char_01",
+      "file": "char_01.png",
+      "cols": 56,
+      "rows": 41,
+      "tileSize": 16,
+      "pixelWidth": 896,
+      "pixelHeight": 656,
+      "sourcePath": "2_Characters/Character_Generator/0_Premade_Characters/16x16/Premade_Character_01.png",
+      "purpose": "premade character 1 (walk + idle + sit + phone animations stacked)"
+    },
+    {
+      "key": "char_02",
+      "file": "char_02.png",
+      "cols": 56,
+      "rows": 41,
+      "tileSize": 16,
+      "pixelWidth": 896,
+      "pixelHeight": 656,
+      "sourcePath": "2_Characters/Character_Generator/0_Premade_Characters/16x16/Premade_Character_02.png",
+      "purpose": "premade character 2 (walk + idle + sit + phone animations stacked)"
+    },
+    {
+      "key": "char_03",
+      "file": "char_03.png",
+      "cols": 56,
+      "rows": 41,
+      "tileSize": 16,
+      "pixelWidth": 896,
+      "pixelHeight": 656,
+      "sourcePath": "2_Characters/Character_Generator/0_Premade_Characters/16x16/Premade_Character_03.png",
+      "purpose": "premade character 3 (walk + idle + sit + phone animations stacked)"
+    },
+    {
+      "key": "char_04",
+      "file": "char_04.png",
+      "cols": 56,
+      "rows": 41,
+      "tileSize": 16,
+      "pixelWidth": 896,
+      "pixelHeight": 656,
+      "sourcePath": "2_Characters/Character_Generator/0_Premade_Characters/16x16/Premade_Character_04.png",
+      "purpose": "premade character 4 (walk + idle + sit + phone animations stacked)"
+    },
+    {
+      "key": "char_05",
+      "file": "char_05.png",
+      "cols": 56,
+      "rows": 41,
+      "tileSize": 16,
+      "pixelWidth": 896,
+      "pixelHeight": 656,
+      "sourcePath": "2_Characters/Character_Generator/0_Premade_Characters/16x16/Premade_Character_05.png",
+      "purpose": "premade character 5 (walk + idle + sit + phone animations stacked)"
+    },
+    {
+      "key": "char_06",
+      "file": "char_06.png",
+      "cols": 56,
+      "rows": 41,
+      "tileSize": 16,
+      "pixelWidth": 896,
+      "pixelHeight": 656,
+      "sourcePath": "2_Characters/Character_Generator/0_Premade_Characters/16x16/Premade_Character_06.png",
+      "purpose": "premade character 6 (walk + idle + sit + phone animations stacked)"
+    },
+    {
+      "key": "char_07",
+      "file": "char_07.png",
+      "cols": 56,
+      "rows": 41,
+      "tileSize": 16,
+      "pixelWidth": 896,
+      "pixelHeight": 656,
+      "sourcePath": "2_Characters/Character_Generator/0_Premade_Characters/16x16/Premade_Character_07.png",
+      "purpose": "premade character 7 (walk + idle + sit + phone animations stacked)"
+    },
+    {
+      "key": "char_08",
+      "file": "char_08.png",
+      "cols": 56,
+      "rows": 41,
+      "tileSize": 16,
+      "pixelWidth": 896,
+      "pixelHeight": 656,
+      "sourcePath": "2_Characters/Character_Generator/0_Premade_Characters/16x16/Premade_Character_08.png",
+      "purpose": "premade character 8 (walk + idle + sit + phone animations stacked)"
+    },
+    {
+      "key": "char_09",
+      "file": "char_09.png",
+      "cols": 56,
+      "rows": 41,
+      "tileSize": 16,
+      "pixelWidth": 896,
+      "pixelHeight": 656,
+      "sourcePath": "2_Characters/Character_Generator/0_Premade_Characters/16x16/Premade_Character_09.png",
+      "purpose": "premade character 9 (walk + idle + sit + phone animations stacked)"
+    },
+    {
+      "key": "char_10",
+      "file": "char_10.png",
+      "cols": 56,
+      "rows": 41,
+      "tileSize": 16,
+      "pixelWidth": 896,
+      "pixelHeight": 656,
+      "sourcePath": "2_Characters/Character_Generator/0_Premade_Characters/16x16/Premade_Character_10.png",
+      "purpose": "premade character 10 (walk + idle + sit + phone animations stacked)"
+    },
+    {
+      "key": "char_11",
+      "file": "char_11.png",
+      "cols": 56,
+      "rows": 41,
+      "tileSize": 16,
+      "pixelWidth": 896,
+      "pixelHeight": 656,
+      "sourcePath": "2_Characters/Character_Generator/0_Premade_Characters/16x16/Premade_Character_11.png",
+      "purpose": "premade character 11 (walk + idle + sit + phone animations stacked)"
+    },
+    {
+      "key": "char_12",
+      "file": "char_12.png",
+      "cols": 56,
+      "rows": 41,
+      "tileSize": 16,
+      "pixelWidth": 896,
+      "pixelHeight": 656,
+      "sourcePath": "2_Characters/Character_Generator/0_Premade_Characters/16x16/Premade_Character_12.png",
+      "purpose": "premade character 12 (walk + idle + sit + phone animations stacked)"
+    },
+    {
+      "key": "char_13",
+      "file": "char_13.png",
+      "cols": 56,
+      "rows": 41,
+      "tileSize": 16,
+      "pixelWidth": 896,
+      "pixelHeight": 656,
+      "sourcePath": "2_Characters/Character_Generator/0_Premade_Characters/16x16/Premade_Character_13.png",
+      "purpose": "premade character 13 (walk + idle + sit + phone animations stacked)"
+    },
+    {
+      "key": "char_14",
+      "file": "char_14.png",
+      "cols": 56,
+      "rows": 41,
+      "tileSize": 16,
+      "pixelWidth": 896,
+      "pixelHeight": 656,
+      "sourcePath": "2_Characters/Character_Generator/0_Premade_Characters/16x16/Premade_Character_14.png",
+      "purpose": "premade character 14 (walk + idle + sit + phone animations stacked)"
+    },
+    {
+      "key": "char_15",
+      "file": "char_15.png",
+      "cols": 56,
+      "rows": 41,
+      "tileSize": 16,
+      "pixelWidth": 896,
+      "pixelHeight": 656,
+      "sourcePath": "2_Characters/Character_Generator/0_Premade_Characters/16x16/Premade_Character_15.png",
+      "purpose": "premade character 15 (walk + idle + sit + phone animations stacked)"
+    },
+    {
+      "key": "char_16",
+      "file": "char_16.png",
+      "cols": 56,
+      "rows": 41,
+      "tileSize": 16,
+      "pixelWidth": 896,
+      "pixelHeight": 656,
+      "sourcePath": "2_Characters/Character_Generator/0_Premade_Characters/16x16/Premade_Character_16.png",
+      "purpose": "premade character 16 (walk + idle + sit + phone animations stacked)"
+    },
+    {
+      "key": "char_17",
+      "file": "char_17.png",
+      "cols": 56,
+      "rows": 41,
+      "tileSize": 16,
+      "pixelWidth": 896,
+      "pixelHeight": 656,
+      "sourcePath": "2_Characters/Character_Generator/0_Premade_Characters/16x16/Premade_Character_17.png",
+      "purpose": "premade character 17 (walk + idle + sit + phone animations stacked)"
+    },
+    {
+      "key": "char_18",
+      "file": "char_18.png",
+      "cols": 56,
+      "rows": 41,
+      "tileSize": 16,
+      "pixelWidth": 896,
+      "pixelHeight": 656,
+      "sourcePath": "2_Characters/Character_Generator/0_Premade_Characters/16x16/Premade_Character_18.png",
+      "purpose": "premade character 18 (walk + idle + sit + phone animations stacked)"
+    },
+    {
+      "key": "char_19",
+      "file": "char_19.png",
+      "cols": 56,
+      "rows": 41,
+      "tileSize": 16,
+      "pixelWidth": 896,
+      "pixelHeight": 656,
+      "sourcePath": "2_Characters/Character_Generator/0_Premade_Characters/16x16/Premade_Character_19.png",
+      "purpose": "premade character 19 (walk + idle + sit + phone animations stacked)"
+    },
+    {
+      "key": "char_20",
+      "file": "char_20.png",
+      "cols": 56,
+      "rows": 41,
+      "tileSize": 16,
+      "pixelWidth": 896,
+      "pixelHeight": 656,
+      "sourcePath": "2_Characters/Character_Generator/0_Premade_Characters/16x16/Premade_Character_20.png",
+      "purpose": "premade character 20 (walk + idle + sit + phone animations stacked)"
+    }
+  ]
+}

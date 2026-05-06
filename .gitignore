@@ -23,6 +23,11 @@
 # electron-builder output
 /release
 
+# LimeZu pixel-art assets — extracted by `npm run prepare-assets` from
+# the licensed zip in ~/Downloads. License forbids redistribution of
+# the raw asset files; the manifest is committed but the PNGs are not.
+/public/assets/limezu
+
 # misc
 .DS_Store
 *.pem
