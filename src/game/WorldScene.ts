@@ -210,7 +210,10 @@ export class WorldScene extends Phaser.Scene {
     // Stop the canvas from ever showing the browser's native right-click
     // menu. We handle right-click entirely in React (see GameCanvasInner).
     this.input.mouse?.disableContextMenu();
-    this.cameras.main.setBackgroundColor(GB.lightest);
+    // Clear color matches the page chrome (`bg-page` in globals.css) so
+    // any letterbox / pillarbox bands blend with the app frame instead
+    // of flashing pastel green.
+    this.cameras.main.setBackgroundColor("#271d2e");
     this.cameras.main.roundPixels = true;
 
     // Async-load the Tiled `.tmj`, queue its tileset PNGs into Phaser's
@@ -245,12 +248,13 @@ export class WorldScene extends Phaser.Scene {
       });
     }
 
-    // Camera bounds with a full-map-size pad on each side so the
-    // building can always be centered no matter the viewport.
+    // Camera bounds = the map exactly. No pad → the user can't scroll
+    // out of the painted area, so the chrome-colored clear never shows
+    // through the play area. Phaser's centering math (centerOn) still
+    // works inside these bounds.
     const mapW = this.zone.cols * TILE_SIZE;
     const mapH = this.zone.rows * TILE_SIZE;
-    const pad = Math.max(mapW, mapH);
-    this.cameras.main.setBounds(-pad, -pad, mapW + pad * 2, mapH + pad * 2);
+    this.cameras.main.setBounds(0, 0, mapW, mapH);
 
     for (const npc of useNpcStore.getState().staticNpcs) {
       this.ensureNpcTexture(npc);
@@ -267,20 +271,22 @@ export class WorldScene extends Phaser.Scene {
     // Tether rendering layer — sits under sprites so it doesn't obscure them.
     this.tetherGfx = this.add.graphics().setDepth(950);
 
-    // Center the camera on the factory floor's geometric middle. Re-run
-    // this whenever the canvas resizes AS LONG AS the user hasn't moved
-    // the camera yet — once they've panned or zoomed, we respect their
-    // position and stop auto-centering.
+    // Center + fit the map to the current viewport. We use the LARGER
+    // of width-fit / height-fit ratios so the map COVERS the canvas
+    // (no chrome bleed-through) — accepts a small crop on whichever
+    // axis is more constrained. When the user scroll-zooms, this stops
+    // auto-fitting and respects their viewing choice.
     const cam = this.cameras.main;
-    cam.setZoom(1);
-    const recenter = () => {
+    const fitZoom = () => {
       if (this.hasUserMovedCamera) return;
+      const fit = Math.max(cam.width / mapW, cam.height / mapH);
+      cam.setZoom(fit);
       cam.centerOn(mapW / 2, mapH / 2);
     };
-    recenter();
-    this.scale.on("resize", recenter);
+    fitZoom();
+    this.scale.on("resize", fitZoom);
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
-      this.scale.off("resize", recenter);
+      this.scale.off("resize", fitZoom);
     });
 
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
@@ -1553,7 +1559,9 @@ export const worldSceneConfig: Phaser.Types.Core.GameConfig = {
   height: NATIVE_H,
   pixelArt: true,
   roundPixels: true,
-  backgroundColor: GB.lightest,
+  // Match the page chrome color (`bg-page` in src/app/globals.css) so
+  // any unrendered area at the canvas edges blends into the frame.
+  backgroundColor: "#271d2e",
   scene: [WorldScene],
   scale: { mode: Phaser.Scale.NONE },
   input: { keyboard: true },
