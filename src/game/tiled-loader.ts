@@ -86,9 +86,18 @@ export interface ParsedMap {
 
 // Map of known PNG basenames (as referenced inside the .tmj) → public file
 // they were copied to. Add entries here as you author more tilesets.
+//
+// As a convenience, we also accept identity matches: if the .tmj
+// references "ai-office.png" directly (because it's saved inside
+// public/assets/maps/), we'll map it 1:1. The explicit list still
+// wins for legacy ~/Downloads paths.
 const TILESET_PUBLIC_NAMES: Record<string, string> = {
+  // Original Tiled-saved-from-Downloads names.
   "ChatGPT Image May 6, 2026, 08_47_02 PM.png": "ai-office-items.png",
   "ChatGPT Image May 6, 2026, 08_45_41 PM.png": "ai-office.png",
+  // Public-relative names (Tiled's `../ai-office.png` after re-saving).
+  "ai-office-items.png": "ai-office-items.png",
+  "ai-office.png": "ai-office.png",
 };
 
 // External tileset references (Tiled's `.tsx` files) we can't fetch at
