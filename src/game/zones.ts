@@ -26,20 +26,23 @@ export interface ZoneDef {
   anchors: Partial<Record<RoomId, { col: number; row: number }>>;
 }
 
-// Hand-picked anchors for the current 48×32 fullMap. Update these to
-// match the actual room layout once we eyeball the rendered map.
-const DEFAULT_ANCHORS: Partial<Record<RoomId, { col: number; row: number }>> = {
-  library: { col: 8, row: 8 },
-  coding_room: { col: 18, row: 8 },
-  desk: { col: 28, row: 8 },
-  cinema: { col: 38, row: 8 },
-  tool_workshop: { col: 8, row: 22 },
-  meeting_room: { col: 18, row: 22 },
-  testing_lab: { col: 28, row: 22 },
+// Hard fallback anchors for any RoomId the authored map doesn't define.
+// In practice the .tmj should name rooms (Training, DataCenter, DevOps,
+// Security, WarRoom, "Meeting Room", Lounge) and the loader fills in
+// real cells. These constants only matter if you remove a room from
+// Tiled — keeps the routing from crashing.
+const FALLBACK_ANCHORS: Partial<Record<RoomId, { col: number; row: number }>> = {
+  library: { col: 13, row: 2 },
+  coding_room: { col: 27, row: 3 },
+  desk: { col: 20, row: 3 },
+  cinema: { col: 33, row: 15 },
+  tool_workshop: { col: 42, row: 3 },
+  meeting_room: { col: 33, row: 10 },
+  testing_lab: { col: 34, row: 3 },
 };
 
-// South-edge entry/exit. Defaults to roughly the middle of the bottom
-// row; if the authored map's front door is elsewhere, override here.
+// South-edge entry/exit. Updated at load time to land on a walkable
+// cell near the bottom edge.
 let exteriorAnchors = {
   entry: { col: 24, row: 31 },
   exit: { col: 24, row: 31 },
@@ -62,6 +65,16 @@ let cachedBundle: InteriorZoneBundle | null = null;
 export async function loadInteriorZone(): Promise<InteriorZoneBundle> {
   if (cachedBundle) return cachedBundle;
   const parsed = await loadTiledMap();
+  // Anchors: prefer the .tmj-derived rooms; fall back to FALLBACK_ANCHORS
+  // for any RoomId the authored map didn't define.
+  const anchors: Partial<Record<RoomId, { col: number; row: number }>> = {
+    ...FALLBACK_ANCHORS,
+  };
+  for (const room of parsed.rooms) {
+    anchors[room.id] = room.anchor;
+  }
+  // Refresh exterior anchor to a walkable cell near the south edge.
+  setExteriorAnchors(pickExteriorAnchor(parsed));
   const zone: ZoneDef = {
     id: "interior",
     name: "Agent Ops",
@@ -72,13 +85,36 @@ export async function loadInteriorZone(): Promise<InteriorZoneBundle> {
     gids: parsed.background.data,
     tilesets: parsed.tilesets,
     blocking: parsed.blocking,
-    anchors: DEFAULT_ANCHORS,
+    anchors,
   };
   cachedBundle = { zone, parsed };
-  // Hand the active zone to rooms.ts so isWalkable() picks up the
-  // collision grid instead of falling back to "everything walkable".
-  setActiveZone(zone);
+  // Hand the active zone + the named rooms extracted from the .tmj to
+  // rooms.ts so isWalkable() / ROOM_ANCHORS / ROOM_REGIONS pick up the
+  // live data.
+  setActiveZone(zone, parsed.rooms);
   return cachedBundle;
+}
+
+function pickExteriorAnchor(parsed: {
+  cols: number;
+  rows: number;
+  blocking: boolean[][];
+}): { entry: { col: number; row: number }; exit: { col: number; row: number } } {
+  // Walk the bottom row left→right looking for the first walkable cell;
+  // fall back to col 24 if everything's blocked.
+  const bottomRow = parsed.rows - 1;
+  for (let c = 0; c < parsed.cols; c++) {
+    if (!parsed.blocking[bottomRow][c]) {
+      return {
+        entry: { col: c, row: bottomRow },
+        exit: { col: c, row: bottomRow },
+      };
+    }
+  }
+  return {
+    entry: { col: 24, row: bottomRow },
+    exit: { col: 24, row: bottomRow },
+  };
 }
 
 export function isWalkableIn(zone: ZoneDef, col: number, row: number): boolean {

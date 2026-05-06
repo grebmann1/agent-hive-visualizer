@@ -1,7 +1,10 @@
 // tiled-loader.ts — fetches a Tiled map (.tmj) at runtime, normalizes its
 // tileset references to paths Phaser can load, decodes gids into
-// (tileset, frame) pairs, and rasterizes any "Object Layer" collidable
-// rectangles into a tile-coord boolean grid for pathfinding.
+// (tileset, frame) pairs, rasterizes any "Object Layer" collidable
+// rectangles into a tile-coord boolean grid for pathfinding, and
+// extracts NAMED ROOM OBJECTS to derive RoomId → cell anchors + regions
+// directly from the authored map. Renaming or moving a room in Tiled
+// updates the in-game routing without code changes.
 //
 // We cache the parsed map at module level so multiple imports don't
 // re-fetch.
@@ -45,12 +48,31 @@ export interface ObjectRect {
   height: number;
 }
 
+// Imported only as a type so RoomId stays in events/types and we don't
+// drag the whole stateToRoom map into this file.
+import type { RoomId } from "../events/types";
+
+export interface RoomAnchorRect {
+  /** RoomId we'll route NPCs to (mapped from the Tiled object name). */
+  id: RoomId;
+  /** Free-form label as authored in Tiled. */
+  label: string;
+  /** Inclusive tile-coord bounds derived from the Tiled rect. */
+  colMin: number;
+  rowMin: number;
+  colMax: number;
+  rowMax: number;
+  /** A walkable cell near the rect's center — where an NPC parks. */
+  anchor: { col: number; row: number };
+}
+
 export interface ParsedMap {
   cols: number;
   rows: number;
   tileWidth: number;
   tileHeight: number;
-  /** Background tile layer. We currently consume only the first tile layer. */
+  /** Background tile layer. We currently consume only the "Background"
+   *  tile layer (or the first tilelayer if "Background" is missing). */
   background: TileGrid;
   /** All tilesets in firstGid order. */
   tilesets: TilesetMeta[];
@@ -58,6 +80,8 @@ export interface ParsedMap {
   objects: ObjectRect[];
   /** Boolean blocking grid derived from collidable objects. true = blocked. */
   blocking: boolean[][];
+  /** Named room rects → in-game RoomId, with computed walkable anchor. */
+  rooms: RoomAnchorRect[];
 }
 
 // Map of known PNG basenames (as referenced inside the .tmj) → public file
@@ -67,7 +91,57 @@ const TILESET_PUBLIC_NAMES: Record<string, string> = {
   "ChatGPT Image May 6, 2026, 08_45_41 PM.png": "ai-office.png",
 };
 
+// External tileset references (Tiled's `.tsx` files) we can't fetch at
+// runtime — they're outside `public/`. This map fakes the resolution by
+// pointing each external `source:` filename at the inline tileset image
+// + grid dimensions we already know about. Add entries when you author
+// new external tilesets.
+const TILESET_EXTERNAL_FALLBACK: Record<
+  string,
+  { publicName: string; columns: number; tileCount: number; tileWidth: number; tileHeight: number }
+> = {
+  "ai-office.tsx": {
+    publicName: "ai-office.png",
+    columns: 48,
+    tileCount: 1536,
+    tileWidth: 32,
+    tileHeight: 32,
+  },
+};
+
 const PUBLIC_MAPS_PREFIX = "/assets/maps";
+
+// Tiled object name → in-game RoomId. Any object whose `name` matches
+// one of these keys (case-insensitive) becomes a room anchor + region.
+// Add new entries when you author new rooms in Tiled.
+//
+// Multiple Tiled names can map to the same RoomId — first one wins,
+// later duplicates are ignored (they still render as decor objects).
+const ROOM_NAME_TO_ID: Record<string, RoomId> = {
+  // Tools / reading-ish work — Read/Grep/Glob/WebFetch.
+  training: "library",
+  library: "library",
+  // Big-picture thinking — Think/Plan/Summarize/Failed.
+  datacenter: "desk",
+  "control room": "desk",
+  ops: "desk",
+  // Code-editing — Edit/Write/MultiEdit.
+  devops: "coding_room",
+  workshop: "coding_room",
+  // Bash / deploy / running tools.
+  warroom: "tool_workshop",
+  "war room": "tool_workshop",
+  kitchen: "tool_workshop",
+  // Test / lab / hospital — running_tests.
+  security: "testing_lab",
+  "test rig": "testing_lab",
+  // Sub-agent collaboration — Task tool.
+  "meeting room": "meeting_room",
+  meeting: "meeting_room",
+  // Idle / completed / waiting.
+  lounge: "cinema",
+  cinema: "cinema",
+};
 
 interface RawTileset {
   firstgid: number;
@@ -127,45 +201,77 @@ export function loadTiledMap(url = `${PUBLIC_MAPS_PREFIX}/fullMap.tmj`): Promise
 }
 
 async function fetchAndParse(url: string): Promise<ParsedMap> {
-  const res = await fetch(url);
+  // `no-store` so editing the .tmj while dev runs doesn't show a cached
+  // version on next reload.
+  const res = await fetch(url, { cache: "no-store" });
   if (!res.ok) {
     throw new Error(`tiled-loader: ${url} → HTTP ${res.status}`);
   }
   const raw = (await res.json()) as RawMap;
 
-  // Resolve tilesets — only those with a direct `image` are usable in the
-  // browser. The .tmj also has a `source: "..."` external tileset entry
-  // pointing at a .tsx file we can't follow; merge it with whichever
-  // inline tileset shares its basename.
+  // Resolve tilesets. Two flavors:
+  //   - inline (`image`): the PNG basename is mapped to a public file
+  //     via TILESET_PUBLIC_NAMES.
+  //   - external (`source` → .tsx): we can't fetch the .tsx at runtime,
+  //     so we fall back to a hand-curated TILESET_EXTERNAL_FALLBACK
+  //     entry that re-uses an already-public PNG with the right grid.
   const resolved: TilesetMeta[] = [];
   for (const ts of raw.tilesets) {
-    if (!ts.image) continue;
-    const basename = ts.image.split(/[/\\]/).pop() ?? ts.image;
-    const publicName = TILESET_PUBLIC_NAMES[basename];
-    if (!publicName) {
-      console.warn(
-        `[tiled-loader] tileset image "${basename}" has no public mapping; skipping. Add it to TILESET_PUBLIC_NAMES.`,
-      );
+    if (ts.image) {
+      const basename = ts.image.split(/[/\\]/).pop() ?? ts.image;
+      const publicName = TILESET_PUBLIC_NAMES[basename];
+      if (!publicName) {
+        console.warn(
+          `[tiled-loader] tileset image "${basename}" has no public mapping; skipping. Add it to TILESET_PUBLIC_NAMES.`,
+        );
+        continue;
+      }
+      resolved.push({
+        key: deriveKey(publicName),
+        imageUrl: `${PUBLIC_MAPS_PREFIX}/${publicName}`,
+        firstGid: ts.firstgid,
+        columns: ts.columns ?? 0,
+        tileCount: ts.tilecount ?? 0,
+        tileWidth: ts.tilewidth ?? raw.tilewidth,
+        tileHeight: ts.tileheight ?? raw.tileheight,
+      });
       continue;
     }
-    resolved.push({
-      key: deriveKey(publicName),
-      imageUrl: `${PUBLIC_MAPS_PREFIX}/${publicName}`,
-      firstGid: ts.firstgid,
-      columns: ts.columns ?? 0,
-      tileCount: ts.tilecount ?? 0,
-      tileWidth: ts.tilewidth ?? raw.tilewidth,
-      tileHeight: ts.tileheight ?? raw.tileheight,
-    });
+    if (ts.source) {
+      const basename = ts.source.split(/[/\\]/).pop() ?? ts.source;
+      const fallback = TILESET_EXTERNAL_FALLBACK[basename];
+      if (!fallback) {
+        console.warn(
+          `[tiled-loader] external tileset "${basename}" has no fallback; skipping. Add to TILESET_EXTERNAL_FALLBACK.`,
+        );
+        continue;
+      }
+      resolved.push({
+        key: deriveKey(`${basename}-${ts.firstgid}`),
+        imageUrl: `${PUBLIC_MAPS_PREFIX}/${fallback.publicName}`,
+        firstGid: ts.firstgid,
+        columns: fallback.columns,
+        tileCount: fallback.tileCount,
+        tileWidth: fallback.tileWidth,
+        tileHeight: fallback.tileHeight,
+      });
+      continue;
+    }
+    console.warn("[tiled-loader] tileset entry has neither image nor source; skipping");
   }
   // Sort by firstGid so resolveGid can binary-pick.
   resolved.sort((a, b) => a.firstGid - b.firstGid);
 
-  // First tile layer is the canvas. (We could merge multiple tile layers
-  // later if needed — the current map ships one.)
-  const tileLayer = raw.layers.find(
-    (l): l is RawTileLayer => l.type === "tilelayer",
-  );
+  // Tile layer named "Background" is the canvas. Falls back to the
+  // first tilelayer if the canonical name is missing — keeps older
+  // single-layer .tmj files working.
+  const tileLayer =
+    (raw.layers.find(
+      (l): l is RawTileLayer => l.type === "tilelayer" && l.name === "Background",
+    ) as RawTileLayer | undefined) ??
+    (raw.layers.find(
+      (l): l is RawTileLayer => l.type === "tilelayer",
+    ) as RawTileLayer | undefined);
   if (!tileLayer) {
     throw new Error("tiled-loader: no tile layer found in map");
   }
@@ -203,6 +309,15 @@ async function fetchAndParse(url: string): Promise<ParsedMap> {
     raw.tileheight,
   );
 
+  const rooms = deriveRooms(
+    objects,
+    blocking,
+    raw.width,
+    raw.height,
+    raw.tilewidth,
+    raw.tileheight,
+  );
+
   return {
     cols: raw.width,
     rows: raw.height,
@@ -212,7 +327,66 @@ async function fetchAndParse(url: string): Promise<ParsedMap> {
     tilesets: resolved,
     objects,
     blocking,
+    rooms,
   };
+}
+
+/** Derive RoomAnchorRects from named objects whose names match
+ *  ROOM_NAME_TO_ID. The anchor is a walkable cell near the rect's
+ *  center; we spiral outward up to 6 cells if the center itself is
+ *  blocked. Duplicate names map to the same RoomId — first wins. */
+function deriveRooms(
+  objects: ObjectRect[],
+  blocking: boolean[][],
+  cols: number,
+  rows: number,
+  tw: number,
+  th: number,
+): RoomAnchorRect[] {
+  const out: RoomAnchorRect[] = [];
+  const claimed = new Set<RoomId>();
+  for (const obj of objects) {
+    const id = ROOM_NAME_TO_ID[obj.name.toLowerCase()];
+    if (!id) continue;
+    if (claimed.has(id)) continue;
+    claimed.add(id);
+    const colMin = Math.max(0, Math.floor(obj.x / tw));
+    const colMax = Math.min(cols - 1, Math.floor((obj.x + obj.width) / tw));
+    const rowMin = Math.max(0, Math.floor(obj.y / th));
+    const rowMax = Math.min(rows - 1, Math.floor((obj.y + obj.height) / th));
+    const cc = Math.floor((colMin + colMax) / 2);
+    const cr = Math.floor((rowMin + rowMax) / 2);
+    const anchor = findWalkable(blocking, cc, cr, colMin, colMax, rowMin, rowMax);
+    out.push({ id, label: obj.name, colMin, colMax, rowMin, rowMax, anchor });
+  }
+  return out;
+}
+
+function findWalkable(
+  blocking: boolean[][],
+  startCol: number,
+  startRow: number,
+  colMin: number,
+  colMax: number,
+  rowMin: number,
+  rowMax: number,
+): { col: number; row: number } {
+  if (!blocking[startRow]?.[startCol]) {
+    return { col: startCol, row: startRow };
+  }
+  for (let d = 1; d < 8; d++) {
+    for (let dr = -d; dr <= d; dr++) {
+      for (let dc = -d; dc <= d; dc++) {
+        const r = startRow + dr;
+        const c = startCol + dc;
+        if (r < rowMin || r > rowMax || c < colMin || c > colMax) continue;
+        if (!blocking[r]?.[c]) return { col: c, row: r };
+      }
+    }
+  }
+  // Fallback: return the start cell even if blocked — better than
+  // throwing.
+  return { col: startCol, row: startRow };
 }
 
 function deriveKey(filename: string): string {

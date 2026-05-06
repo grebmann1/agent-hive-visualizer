@@ -124,17 +124,22 @@ export function makeDynamicNpc(input: {
   const baseTile =
     DYNAMIC_BASE_TILES[(h >> 5) % DYNAMIC_BASE_TILES.length];
   const room = ROOM_CYCLE[h % ROOM_CYCLE.length];
-  // First-pass anchors for the 48x32 fullMap. These are duplicated in
-  // src/game/rooms.ts:ROOM_ANCHORS — keep in sync if you adjust either.
-  const ANCHORS: Record<RoomId, { col: number; row: number }> = {
-    library:       { col: 8,  row: 8  },
-    coding_room:   { col: 18, row: 8  },
-    desk:          { col: 28, row: 8  },
-    cinema:        { col: 38, row: 8  },
-    tool_workshop: { col: 8,  row: 22 },
-    meeting_room:  { col: 18, row: 22 },
-    testing_lab:   { col: 28, row: 22 },
-  };
+  // Read anchors live from rooms.ts — derived from named objects in
+  // the .tmj. Lazy-loaded import dodges circular module initialization
+  // (rooms.ts → zones.ts → ... → useNpcStore in some branches).
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { ROOM_ANCHORS } = require("../game/rooms") as typeof import("../game/rooms");
+  const ANCHORS = (Object.keys({
+    library: 0, coding_room: 0, desk: 0, cinema: 0,
+    tool_workshop: 0, meeting_room: 0, testing_lab: 0,
+  }) as RoomId[]).reduce<Record<RoomId, { col: number; row: number }>>(
+    (acc, id) => {
+      const a = ROOM_ANCHORS[id];
+      acc[id] = a ? { col: a.col, row: a.row } : { col: 24, row: 16 };
+      return acc;
+    },
+    {} as Record<RoomId, { col: number; row: number }>,
+  );
   const anchor = ANCHORS[room];
 
   // Small variation per hash so multiple NPCs don't stack
