@@ -26,6 +26,18 @@
 //  Compromise to fit 32 cols total — the user can grow the map later.)
 
 import type { RoomId } from "../events/types";
+import savedMapRaw from "./map.json";
+
+// Cast the JSON to a known shape so the inferred `never[]` from the empty
+// floor array doesn't poison the rest of the file.
+interface SavedMap {
+  cols: number;
+  rows: number;
+  tileSize: number;
+  floor: (AtlasSlice | null)[][];
+  decor: (AtlasSlice | null)[][];
+}
+const savedMap = savedMapRaw as unknown as SavedMap;
 import {
   BOOKSHELF_TALL,
   COFFEE_TABLE,
@@ -303,13 +315,22 @@ export const EXTERIOR_ANCHORS = {
 // Backwards-compat constant some legacy code still imports.
 export const ROW_SHIFT_FROM_INTERIOR = 0;
 
+// If map.json has been authored via /map-editor, prefer it over the
+// programmatic FLOOR/DECOR painted above. Empty floor[] means "no
+// authored map yet" — keep the programmatic fallback.
+const useSavedMap =
+  Array.isArray(savedMap.floor) &&
+  savedMap.floor.length === ROWS &&
+  Array.isArray(savedMap.floor[0]) &&
+  savedMap.floor[0].length === COLS;
+
 export const INTERIOR_ZONE: ZoneDef = {
   id: "interior",
   name: "Agent Ops",
   cols: COLS,
   rows: ROWS,
-  floor: FLOOR,
-  decor: DECOR,
+  floor: useSavedMap ? savedMap.floor : FLOOR,
+  decor: useSavedMap ? savedMap.decor : DECOR,
   anchors: ANCHORS,
 };
 
@@ -325,27 +346,36 @@ export const ZONES: Record<ZoneId, ZoneDef> = {
 // limezu-tiles.ts is a single shared object literal. We use Set lookups
 // for blocking/walkable membership.
 
-const BLOCKING_FLOOR = new Set<AtlasSlice>([
-  WALL_TOP,
-  WALL_BOTTOM,
-  WALL_LEFT,
-  WALL_RIGHT,
-  WALL_CORNER_TL,
-  WALL_CORNER_TR,
-  WALL_CORNER_BL,
-  WALL_CORNER_BR,
-  WALL_T_NORTH,
-  WALL_T_SOUTH,
-]);
+// Wall slices that block movement. We compare by shape (atlas+col+row) so
+// slices coming from JSON (no reference identity to the TILE_* exports)
+// still match correctly.
+const BLOCKING_FLOOR_SHAPES = new Set<string>(
+  [
+    WALL_TOP,
+    WALL_BOTTOM,
+    WALL_LEFT,
+    WALL_RIGHT,
+    WALL_CORNER_TL,
+    WALL_CORNER_TR,
+    WALL_CORNER_BL,
+    WALL_CORNER_BR,
+    WALL_T_NORTH,
+    WALL_T_SOUTH,
+  ].map((s) => sliceKey(s)),
+);
+
+function sliceKey(s: AtlasSlice): string {
+  return `${s.atlas}:${s.col}:${s.row}`;
+}
 
 export function isWalkableIn(zone: ZoneDef, col: number, row: number): boolean {
   if (col < 0 || col >= zone.cols || row < 0 || row >= zone.rows) return false;
   const f = zone.floor[row][col];
   // null cells are exterior grass — walkable.
-  if (f && BLOCKING_FLOOR.has(f)) return false;
+  if (f && BLOCKING_FLOOR_SHAPES.has(sliceKey(f))) return false;
   // Decor that's anything other than null blocks. We don't currently mark
   // any decor as walkable; if we add rugs/posters we'll add a WALKABLE_DECOR
-  // set similar to BLOCKING_FLOOR.
+  // set similar to BLOCKING_FLOOR_SHAPES.
   const d = zone.decor[row][col];
   if (d) return false;
   return true;
