@@ -285,17 +285,25 @@ async function runAgent(
     for (const block of resp.content) {
       if (block.type !== "tool_use") continue;
       try {
-        const result = runTool(map, block.name, block.input as Record<string, unknown>);
-        send({ type: "tool_result", name: block.name, result });
+        const outcome = runTool(map, block.name, block.input as Record<string, unknown>);
+        send({ type: "tool_result", name: block.name, result: outcome.result });
+        // Stream cell deltas so the editor paints live, before commit.
+        if (outcome.changes && outcome.changes.length > 0) {
+          send({ type: "cell_changed", cells: outcome.changes });
+        }
         toolResults.push({
           type: "tool_result",
           tool_use_id: block.id,
-          content: JSON.stringify(result),
+          content: JSON.stringify(outcome.result),
         });
         if (block.name === "commit") {
           await writeMap(map);
           send({ type: "map_updated", floor: map.floor, decor: map.decor });
-          send({ type: "done", reason: (result as { reason?: string }).reason ?? "commit" });
+          send({
+            type: "done",
+            reason:
+              (outcome.result as { reason?: string }).reason ?? "commit",
+          });
           committed = true;
         }
       } catch (err) {
@@ -454,25 +462,41 @@ const TOOL_DEFS: ToolDef[] = [
   },
 ];
 
-interface ToolCtx {
-  map: MapPayload;
+// Tool result + optional cell deltas for live-paint UI. The agent loop
+// streams changes as a "cell_changed" SSE event so the editor sees each
+// placement as it lands, not just at commit.
+interface CellDelta {
+  layer: "floor" | "decor";
+  col: number;
+  row: number;
+  slice: AtlasSlice | null;
+}
+interface ToolOutcome {
+  result: unknown;
+  changes?: CellDelta[];
 }
 
 function runTool(
   map: MapPayload,
   name: string,
   input: Record<string, unknown>,
-): unknown {
+): ToolOutcome {
   switch (name) {
     case "getMap":
       return {
-        cols: map.cols,
-        rows: map.rows,
-        tileSize: map.tileSize,
-        ascii: renderAscii(map),
+        result: {
+          cols: map.cols,
+          rows: map.rows,
+          tileSize: map.tileSize,
+          ascii: renderAscii(map),
+        },
       };
     case "listTiles":
-      return listTilesTool(typeof input.category === "string" ? input.category : undefined);
+      return {
+        result: listTilesTool(
+          typeof input.category === "string" ? input.category : undefined,
+        ),
+      };
     case "placeTile":
       return placeTileTool(map, input);
     case "fillRect":
@@ -480,7 +504,7 @@ function runTool(
     case "eraseRect":
       return fillRectTool(map, { ...input, tile: "null" });
     case "commit":
-      return { ok: true, reason: input.reason ?? "" };
+      return { result: { ok: true, reason: input.reason ?? "" } };
     default:
       throw new Error(`unknown tool: ${name}`);
   }
@@ -500,7 +524,7 @@ function listTilesTool(category?: string) {
   };
 }
 
-function placeTileTool(map: MapPayload, input: Record<string, unknown>) {
+function placeTileTool(map: MapPayload, input: Record<string, unknown>): ToolOutcome {
   const layer = input.layer;
   const col = Number(input.col);
   const row = Number(input.row);
@@ -518,10 +542,13 @@ function placeTileTool(map: MapPayload, input: Record<string, unknown>) {
   }
   const slice = resolveTile(tileName);
   map[layer][row][col] = slice;
-  return { ok: true, layer, col, row, tile: tileName };
+  return {
+    result: { ok: true, layer, col, row, tile: tileName },
+    changes: [{ layer, col, row, slice }],
+  };
 }
 
-function fillRectTool(map: MapPayload, input: Record<string, unknown>) {
+function fillRectTool(map: MapPayload, input: Record<string, unknown>): ToolOutcome {
   const layer = input.layer;
   if (layer !== "floor" && layer !== "decor") {
     throw new Error(`layer must be 'floor' or 'decor'`);
@@ -544,14 +571,17 @@ function fillRectTool(map: MapPayload, input: Record<string, unknown>) {
   }
   const tileName = String(input.tile ?? "");
   const slice = resolveTile(tileName);
-  let painted = 0;
+  const changes: CellDelta[] = [];
   for (let r = rowMin; r <= rowMax; r++) {
     for (let c = colMin; c <= colMax; c++) {
       map[layer][r][c] = slice;
-      painted++;
+      changes.push({ layer, col: c, row: r, slice });
     }
   }
-  return { ok: true, layer, painted, tile: tileName };
+  return {
+    result: { ok: true, layer, painted: changes.length, tile: tileName },
+    changes,
+  };
 }
 
 function resolveTile(name: string): AtlasSlice | null {

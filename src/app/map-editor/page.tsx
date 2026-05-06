@@ -60,7 +60,7 @@ export default function MapEditorPage() {
     selection,
     setSelection,
     clipboard,
-    applyOp,
+    applyExternalChanges,
     undo,
     canUndo,
     copySelection,
@@ -292,7 +292,14 @@ export default function MapEditorPage() {
         clipboard={clipboard}
         onOpenGenerator={() => setShowGenerator(true)}
       />
-      <div className="flex-1 grid grid-cols-[420px_1fr] min-h-0">
+      <div
+        className="flex-1 grid min-h-0"
+        style={{
+          gridTemplateColumns: showGenerator
+            ? "420px 1fr 380px"
+            : "420px 1fr",
+        }}
+      >
         <aside className="panel m-2 mr-1 flex flex-col min-h-0 overflow-hidden">
           <div className="flex gap-2 mb-2">
             <PaletteModeButton current={paletteMode} mine="named" onClick={setPaletteMode}>
@@ -347,16 +354,19 @@ export default function MapEditorPage() {
             />
           </div>
         </main>
+        {showGenerator && (
+          <aside className="panel m-2 ml-1 flex flex-col min-h-0 overflow-hidden">
+            <GeneratorPanel
+              onClose={() => setShowGenerator(false)}
+              onCellsChanged={(cells) => applyExternalChanges(cells)}
+              onMapCommitted={(payload) => {
+                setMap(normalizeMap(payload));
+                setSaveStatus(`agent saved · ${new Date().toLocaleTimeString()}`);
+              }}
+            />
+          </aside>
+        )}
       </div>
-      {showGenerator && (
-        <GeneratorDialog
-          onClose={() => setShowGenerator(false)}
-          onMapUpdated={(payload) => {
-            setMap(normalizeMap(payload));
-            setSaveStatus(`agent saved · ${new Date().toLocaleTimeString()}`);
-          }}
-        />
-      )}
     </div>
   );
 }
@@ -1127,7 +1137,14 @@ void rectContains;
 // =============================================================================
 
 interface AgentEvent {
-  type: "text" | "tool_use" | "tool_result" | "map_updated" | "done" | "error";
+  type:
+    | "text"
+    | "tool_use"
+    | "tool_result"
+    | "cell_changed"
+    | "map_updated"
+    | "done"
+    | "error";
   text?: string;
   name?: string;
   input?: unknown;
@@ -1136,14 +1153,19 @@ interface AgentEvent {
   reason?: string;
   floor?: (AtlasSlice | null)[][];
   decor?: (AtlasSlice | null)[][];
+  cells?: Array<{ layer: Layer; col: number; row: number; slice: AtlasSlice | null }>;
 }
 
-function GeneratorDialog({
+function GeneratorPanel({
   onClose,
-  onMapUpdated,
+  onCellsChanged,
+  onMapCommitted,
 }: {
   onClose: () => void;
-  onMapUpdated: (m: MapPayload) => void;
+  onCellsChanged: (
+    cells: Array<{ layer: Layer; col: number; row: number; slice: AtlasSlice | null }>,
+  ) => void;
+  onMapCommitted: (m: MapPayload) => void;
 }) {
   const [prompt, setPrompt] = useState(
     "Build a small office: a corridor with 3 rooms (one library with bookshelves, one kitchen, one meeting room with a round table). Surround with walls. South-facing front door.",
@@ -1193,9 +1215,17 @@ function GeneratorDialog({
               if (!json) continue;
               try {
                 const ev = JSON.parse(json) as AgentEvent;
+                // For cell_changed, patch the editor immediately and skip
+                // adding the raw event to the visible log — every paint
+                // would otherwise spam the chat. Tool_use entries already
+                // describe the action.
+                if (ev.type === "cell_changed" && ev.cells) {
+                  onCellsChanged(ev.cells);
+                  continue;
+                }
                 setEvents((prev) => [...prev, ev]);
                 if (ev.type === "map_updated" && ev.floor && ev.decor) {
-                  onMapUpdated({
+                  onMapCommitted({
                     cols: 32,
                     rows: 22,
                     tileSize: 16,
@@ -1221,72 +1251,74 @@ function GeneratorDialog({
     } finally {
       setRunning(false);
     }
-  }, [prompt, onMapUpdated]);
+  }, [prompt, onCellsChanged, onMapCommitted]);
+
+  // Auto-scroll the log to the latest event.
+  const logRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const el = logRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [events.length, running]);
 
   return (
-    <div
-      className="fixed inset-0 z-[80] flex items-center justify-center bg-black/50 p-4"
-      onClick={onClose}
-    >
-      <div
-        className="dialog-box w-[min(92vw,720px)] max-h-[85vh] flex flex-col"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between mb-3">
-          <h2 className="pixel-font text-[13px] text-accent-dark">
-            ✨ AI MAP GENERATOR
-          </h2>
-          <button
-            onClick={onClose}
-            className="pixel-font text-[9px] text-ink-soft hover:text-ink underline"
-          >
-            [CLOSE]
-          </button>
-        </div>
-        <div className="text-[11px] opacity-75 mb-2">
-          Claude reads the current map and edits it via tool calls
-          (placeTile, fillRect, eraseRect, commit). Save state is persisted
-          when the agent calls commit. Set <code>ANTHROPIC_API_KEY</code> in
-          the dev-server env before running.
-        </div>
-        <textarea
-          value={prompt}
-          onChange={(e) => setPrompt(e.target.value)}
-          rows={3}
-          className="w-full text-[12px] p-2 mb-3 border-2 border-ink rounded bg-paper resize-vertical"
-          placeholder="Describe the map you want…"
-          disabled={running}
-        />
-        <div className="flex items-center gap-2 mb-3">
-          {!running ? (
-            <button
-              onClick={start}
-              className="pixel-font text-[10px] px-3 py-1.5 rounded border-2 border-ink bg-accent text-ink hover:bg-accent-dark tracking-wide"
-            >
-              ▶ RUN AGENT
-            </button>
-          ) : (
-            <button
-              onClick={stop}
-              className="pixel-font text-[10px] px-3 py-1.5 rounded border-2 border-ink bg-red-300 text-ink tracking-wide"
-            >
-              ⏹ STOP
-            </button>
-          )}
-          <span className="text-[11px] opacity-70 italic">
-            {running ? "Streaming…" : `${events.length} events`}
-          </span>
-        </div>
-        <div className="flex-1 overflow-y-auto pixel-scroll border-2 border-ink rounded p-2 bg-paper-dim/30 text-[11px] font-mono leading-relaxed">
-          {events.length === 0 && !running && (
-            <div className="opacity-50 italic">No events yet. Hit RUN AGENT.</div>
-          )}
-          {events.map((e, i) => (
-            <AgentEventLine key={i} event={e} />
-          ))}
-        </div>
+    <>
+      <div className="flex items-center justify-between mb-2">
+        <h2 className="pixel-font text-[12px] text-accent-dark">
+          ✨ AI MAP GENERATOR
+        </h2>
+        <button
+          onClick={onClose}
+          className="pixel-font text-[9px] text-ink-soft hover:text-ink underline"
+        >
+          [CLOSE]
+        </button>
       </div>
-    </div>
+      <div className="text-[10px] opacity-70 mb-2 leading-relaxed">
+        Claude reads the current map and edits it live via tool calls
+        (placeTile, fillRect, eraseRect, commit). Cells update in the
+        center as the agent paints. The save is persisted when the
+        agent calls commit.
+      </div>
+      <textarea
+        value={prompt}
+        onChange={(e) => setPrompt(e.target.value)}
+        rows={3}
+        className="w-full text-[12px] p-2 mb-2 border-2 border-ink rounded bg-paper resize-vertical"
+        placeholder="Describe the map you want…"
+        disabled={running}
+      />
+      <div className="flex items-center gap-2 mb-2">
+        {!running ? (
+          <button
+            onClick={start}
+            className="pixel-font text-[10px] px-3 py-1.5 rounded border-2 border-ink bg-accent text-ink hover:bg-accent-dark tracking-wide"
+          >
+            ▶ RUN AGENT
+          </button>
+        ) : (
+          <button
+            onClick={stop}
+            className="pixel-font text-[10px] px-3 py-1.5 rounded border-2 border-ink bg-red-300 text-ink tracking-wide"
+          >
+            ⏹ STOP
+          </button>
+        )}
+        <span className="text-[10px] opacity-70 italic">
+          {running ? "Streaming…" : `${events.length} events`}
+        </span>
+      </div>
+      <div
+        ref={logRef}
+        className="flex-1 overflow-y-auto pixel-scroll border-2 border-ink rounded p-2 bg-paper-dim/30 text-[11px] font-mono leading-relaxed"
+      >
+        {events.length === 0 && !running && (
+          <div className="opacity-50 italic">No events yet. Hit RUN AGENT.</div>
+        )}
+        {events.map((e, i) => (
+          <AgentEventLine key={i} event={e} />
+        ))}
+      </div>
+    </>
   );
 }
 

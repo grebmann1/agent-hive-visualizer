@@ -105,6 +105,12 @@ export interface UseMapEditor {
   applyOp: (op: Op) => void;
   undo: () => void;
   canUndo: boolean;
+  // Out-of-band patch: applied without recording an inverse on the undo
+  // stack. Used by the AI agent to stream cell deltas live without
+  // polluting the user's undo history.
+  applyExternalChanges: (
+    changes: Array<{ layer: Layer; col: number; row: number; slice: AtlasSlice | null }>,
+  ) => void;
 
   // Compound actions exposed to the UI for keyboard shortcuts.
   copySelection: () => void;
@@ -146,6 +152,44 @@ export function useMapEditor(): UseMapEditor {
         undoStack.current.push(inverse);
         if (undoStack.current.length > UNDO_CAP) undoStack.current.shift();
         setCanUndo(undoStack.current.length > 0);
+        return next;
+      });
+    },
+    [],
+  );
+
+  const applyExternalChanges = useCallback(
+    (
+      changes: Array<{
+        layer: Layer;
+        col: number;
+        row: number;
+        slice: AtlasSlice | null;
+      }>,
+    ) => {
+      if (changes.length === 0) return;
+      setMap((prev) => {
+        if (!prev) return prev;
+        // Touched-row tracking — only clone rows that actually change.
+        const touched = { floor: new Set<number>(), decor: new Set<number>() };
+        for (const c of changes) {
+          if (c.row >= 0 && c.row < prev.rows && c.col >= 0 && c.col < prev.cols) {
+            touched[c.layer].add(c.row);
+          }
+        }
+        const next: MapPayload = {
+          ...prev,
+          floor: prev.floor.map((row, r) =>
+            touched.floor.has(r) ? row.slice() : row,
+          ),
+          decor: prev.decor.map((row, r) =>
+            touched.decor.has(r) ? row.slice() : row,
+          ),
+        };
+        for (const c of changes) {
+          if (c.row < 0 || c.row >= prev.rows || c.col < 0 || c.col >= prev.cols) continue;
+          next[c.layer][c.row][c.col] = c.slice;
+        }
         return next;
       });
     },
@@ -245,6 +289,7 @@ export function useMapEditor(): UseMapEditor {
     clipboard,
     setClipboard,
     applyOp,
+    applyExternalChanges,
     undo,
     canUndo,
     copySelection,
