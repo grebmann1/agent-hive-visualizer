@@ -1,19 +1,17 @@
-// rooms.ts — backward-compat shim.
-// The canonical world data lives in `zones.ts` (multi-zone). This file keeps
-// the old exports (MAP_COLS, MAP_ROWS, FLOOR_LAYER, DECOR_LAYER, ROOM_ANCHORS,
-// isWalkable) wired to the **interior** zone so existing callers that haven't
-// been ported to zones yet keep working.
-//
-// New code should import from `zones.ts` directly.
+// rooms.ts — labels + region rectangles + walkability shim.
+// The canonical world geometry lives in `zones.ts` (LimeZu pipeline).
 
 import type { RoomId } from "../events/types";
-import { INTERIOR_ZONE, ROW_SHIFT_FROM_INTERIOR, isWalkableIn } from "./zones";
+import { INTERIOR_ZONE, isWalkableIn } from "./zones";
 
 export const MAP_COLS = INTERIOR_ZONE.cols;
 export const MAP_ROWS = INTERIOR_ZONE.rows;
 export const TILE_PX = 16;
 
-export const FLOOR_LAYER = INTERIOR_ZONE.layout;
+// New code that needs the floor/decor layers should import them
+// directly from zones.ts (`INTERIOR_ZONE.floor` / `.decor`) rather
+// than going through this file.
+export const FLOOR_LAYER = INTERIOR_ZONE.floor;
 export const DECOR_LAYER = INTERIOR_ZONE.decor;
 
 export interface RoomAnchor {
@@ -25,76 +23,72 @@ export interface RoomAnchor {
   labelRow: number;
 }
 
-// Mixed naming scheme: cozy labels for tool-centric rooms (Library, Workshop,
-// Kitchen, Lounge) plus techy labels for meta-work rooms (Control Room, Test
-// Rig). Underlying RoomId codes stay stable so event-routing + state-to-room
-// logic is untouched.
+// Mixed naming scheme: cozy labels for tool-centric rooms (Library,
+// Workshop, Kitchen, Lounge) plus techy labels for meta-work rooms
+// (Control Room, Test Rig). Underlying RoomId codes stay stable so
+// event-routing + state-to-room logic is untouched.
 export const ROOM_ANCHORS: Record<RoomId, RoomAnchor> = {
+  library: {
+    id: "library",
+    label: "Library",
+    col: INTERIOR_ZONE.anchors.library?.col ?? 5,
+    row: INTERIOR_ZONE.anchors.library?.row ?? 6,
+    labelCol: 2,
+    labelRow: 4,
+  },
   coding_room: {
     id: "coding_room",
     label: "Workshop",
-    col: INTERIOR_ZONE.anchors.coding_room?.col ?? 4,
-    row: INTERIOR_ZONE.anchors.coding_room?.row ?? 4,
-    labelCol: 1,
-    labelRow: 1,
+    col: INTERIOR_ZONE.anchors.coding_room?.col ?? 11,
+    row: INTERIOR_ZONE.anchors.coding_room?.row ?? 6,
+    labelCol: 10,
+    labelRow: 4,
   },
   desk: {
     id: "desk",
     label: "Control Room",
-    col: INTERIOR_ZONE.anchors.desk?.col ?? 11,
-    row: INTERIOR_ZONE.anchors.desk?.row ?? 4,
-    labelCol: 9,
-    labelRow: 1,
+    col: INTERIOR_ZONE.anchors.desk?.col ?? 17,
+    row: INTERIOR_ZONE.anchors.desk?.row ?? 6,
+    labelCol: 14,
+    labelRow: 4,
   },
-  library: {
-    id: "library",
-    label: "Library",
-    col: INTERIOR_ZONE.anchors.library?.col ?? 19,
-    row: INTERIOR_ZONE.anchors.library?.row ?? 4,
-    labelCol: 16,
-    labelRow: 1,
+  cinema: {
+    id: "cinema",
+    label: "Lounge",
+    col: INTERIOR_ZONE.anchors.cinema?.col ?? 25,
+    row: INTERIOR_ZONE.anchors.cinema?.row ?? 6,
+    labelCol: 22,
+    labelRow: 4,
   },
   tool_workshop: {
     id: "tool_workshop",
     label: "Kitchen",
     col: INTERIOR_ZONE.anchors.tool_workshop?.col ?? 5,
-    row: INTERIOR_ZONE.anchors.tool_workshop?.row ?? 12,
-    labelCol: 1,
-    labelRow: 8,
+    row: INTERIOR_ZONE.anchors.tool_workshop?.row ?? 16,
+    labelCol: 2,
+    labelRow: 13,
+  },
+  meeting_room: {
+    id: "meeting_room",
+    label: "Meeting Room",
+    col: INTERIOR_ZONE.anchors.meeting_room?.col ?? 11,
+    row: INTERIOR_ZONE.anchors.meeting_room?.row ?? 16,
+    labelCol: 10,
+    labelRow: 13,
   },
   testing_lab: {
     id: "testing_lab",
     label: "Test Rig",
     col: INTERIOR_ZONE.anchors.testing_lab?.col ?? 17,
-    row: INTERIOR_ZONE.anchors.testing_lab?.row ?? 12,
-    labelCol: 12,
-    labelRow: 8,
-  },
-  cinema: {
-    id: "cinema",
-    label: "Lounge",
-    col: INTERIOR_ZONE.anchors.cinema?.col ?? 11,
-    row: INTERIOR_ZONE.anchors.cinema?.row ?? 19,
-    labelCol: 10,
-    labelRow: 16,
-  },
-  meeting_room: {
-    id: "meeting_room",
-    label: "Meeting Room",
-    col: INTERIOR_ZONE.anchors.meeting_room?.col ?? 13,
-    row: INTERIOR_ZONE.anchors.meeting_room?.row ?? 8,
-    labelCol: 12,
-    labelRow: 7,
+    row: INTERIOR_ZONE.anchors.testing_lab?.row ?? 16,
+    labelCol: 14,
+    labelRow: 13,
   },
 };
 
-// Rectangular regions each room owns for floor-tinting. Inclusive bounds in
-// tile coordinates. Aisle rows 6 + 13 and the central corridor (col 11,
-// rows 7-12) sit between regions and stay untinted (neutral).
-//
-// Chosen by eye from the layout in zones.ts: each top-half cluster spans
-// ~8 cols × 5 rows around its anchor; bottom-half is similar; Lounge
-// occupies rows 16-20.
+// Room regions used by overhead UI (room labels, hit-zones for chips).
+// Inclusive bounds in tile coordinates of the full map. Match the
+// regions in zones.ts so the floor renderer agrees with the labeller.
 export interface RoomRegion {
   id: RoomId;
   colMin: number;
@@ -103,37 +97,19 @@ export interface RoomRegion {
   rowMax: number;
 }
 
-// Regions are authored in interior-relative row indices and shifted at
-// lookup time so growing the exterior band doesn't force a rewrite.
-const INTERIOR_ROOM_REGIONS: RoomRegion[] = [
-  // Top half — split at col 10 / col 14 so Ops stays central
-  { id: "coding_room", colMin: 1,  colMax: 9,  rowMin: 1,  rowMax: 5  },
-  { id: "desk",        colMin: 10, colMax: 14, rowMin: 1,  rowMax: 5  },
-  { id: "library",     colMin: 15, colMax: 22, rowMin: 1,  rowMax: 5  },
-  // Bottom half (below main aisle row 6, above partition row 15)
-  { id: "tool_workshop", colMin: 1,  colMax: 12, rowMin: 7,  rowMax: 14 },
-  // Meeting Room — small pocket carved out of testing_lab's west side. Put
-  // this BEFORE testing_lab in the array so roomIdForCell prefers it.
-  { id: "meeting_room", colMin: 13, colMax: 15, rowMin: 7,  rowMax: 10 },
-  { id: "testing_lab",  colMin: 13, colMax: 22, rowMin: 7,  rowMax: 14 },
-  // Lounge occupies the whole bottom band
-  { id: "cinema", colMin: 1, colMax: 22, rowMin: 16, rowMax: 20 },
+export const ROOM_REGIONS: RoomRegion[] = [
+  { id: "library",       colMin: 2,  colMax: 9,  rowMin: 4,  rowMax: 9  },
+  { id: "coding_room",   colMin: 10, colMax: 13, rowMin: 4,  rowMax: 9  },
+  { id: "desk",          colMin: 14, colMax: 21, rowMin: 4,  rowMax: 9  },
+  { id: "cinema",        colMin: 22, colMax: 29, rowMin: 4,  rowMax: 9  },
+  { id: "tool_workshop", colMin: 2,  colMax: 9,  rowMin: 13, rowMax: 18 },
+  { id: "meeting_room",  colMin: 10, colMax: 13, rowMin: 13, rowMax: 18 },
+  { id: "testing_lab",   colMin: 14, colMax: 21, rowMin: 13, rowMax: 18 },
 ];
 
-export const ROOM_REGIONS: RoomRegion[] = INTERIOR_ROOM_REGIONS.map((r) => ({
-  ...r,
-  rowMin: r.rowMin + ROW_SHIFT_FROM_INTERIOR,
-  rowMax: r.rowMax + ROW_SHIFT_FROM_INTERIOR,
-}));
-
-// Lookup: which room owns this cell (or null for aisle/wall/exterior).
-// O(regions) per call; regions are small so no need for a lookup grid.
 export function roomIdForCell(col: number, row: number): RoomId | null {
   for (const r of ROOM_REGIONS) {
-    if (
-      col >= r.colMin && col <= r.colMax &&
-      row >= r.rowMin && row <= r.rowMax
-    ) {
+    if (col >= r.colMin && col <= r.colMax && row >= r.rowMin && row <= r.rowMax) {
       return r.id;
     }
   }

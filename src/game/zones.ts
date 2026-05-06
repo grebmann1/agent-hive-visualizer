@@ -1,14 +1,75 @@
-import type { RoomId } from "../events/types";
-import { EXT_GRASS, EXT_PATH, EXT_TREE, TILE } from "./pixelArt";
-
-// Single interior zone — the "factory floor" of Agent Ops. v2.0 removed
-// the multi-zone system (plaza door / transitions) when the player avatar
-// was removed; there's no entity to step on a transition tile anymore.
+// zones.ts — building layout for the LimeZu pipeline.
 //
-// The ZoneDef structure remains as a convenient container for:
-//   layout: base tile layer (walls + floor)
-//   decor:  furniture tiles drawn above floor
-//   anchors: map of RoomId -> tile position (for NPC spawning + labels)
+// The map is now authored in terms of AtlasSlice references rather than
+// numeric tile IDs. Two layers per cell:
+//   - `floor`  — base layer (floor or wall slice, always present)
+//   - `decor`  — optional furniture above the floor (null if none)
+// Walkability is derived from a "blocking" check on the slice: walls in
+// the floor layer block; furniture in the decor layer blocks unless it's
+// in the WALKABLE_DECOR set.
+//
+// Building plan (32 cols × 22 rows):
+//
+//   rows 0–2    : exterior grass band (north)
+//   rows 3      : top wall
+//   rows 4–9    : top-floor rooms (Library | Workshop | Control | Lounge)
+//   row 10      : interior wall between top-row and corridor (with doors)
+//   row 11      : corridor floor
+//   row 12      : interior wall between corridor and bottom-row (with doors)
+//   rows 13–18  : bottom-floor rooms (Kitchen | Meeting | Test Rig | Reception)
+//   row 19      : bottom wall (with front-door gap at col 16)
+//   rows 20–21  : exterior grass band (south)
+//
+// Top-row room columns:    Library 2-9, Workshop 10-13, Control 14-21, Lounge 22-29
+// Bottom-row room columns: Kitchen 2-9, Meeting 10-13, TestRig 14-21, Reception 22-29
+// (Workshop + Meeting are 4-col rooms; the other six rooms are 8-col.
+//  Compromise to fit 32 cols total — the user can grow the map later.)
+
+import type { RoomId } from "../events/types";
+import {
+  BOOKSHELF_TALL,
+  COFFEE_TABLE,
+  COUCH_LEFT,
+  COUCH_MID,
+  COUCH_RIGHT,
+  DESK_BOTTOM_GREY,
+  DESK_BOTTOM_WOOD,
+  DESK_TOP_GREY,
+  DESK_TOP_WOOD,
+  DOOR_OPEN,
+  FILE_CABINET,
+  FLOOR_CARPET_GOLD,
+  FLOOR_OFFICE_GREY,
+  FLOOR_TILE_TERRACOTTA,
+  FLOOR_WOOD_DARK,
+  FLOOR_WOOD_LIGHT,
+  FRIDGE,
+  KITCHEN_SINK,
+  KITCHEN_TABLE,
+  LAB_BENCH,
+  LAB_MACHINE_TALL,
+  MICROSCOPE,
+  MONITOR_ON,
+  OFFICE_PLANT_TALL,
+  PRINTER,
+  READING_TABLE,
+  ROUND_TABLE,
+  SERVER_RACK,
+  STONE_PATH,
+  STOVE,
+  TV_STAND,
+  WALL_BOTTOM,
+  WALL_CORNER_BL,
+  WALL_CORNER_BR,
+  WALL_CORNER_TL,
+  WALL_CORNER_TR,
+  WALL_LEFT,
+  WALL_RIGHT,
+  WALL_T_NORTH,
+  WALL_T_SOUTH,
+  WALL_TOP,
+} from "./limezu-tiles";
+import type { AtlasSlice } from "./atlas";
 
 export type ZoneId = "interior";
 
@@ -17,281 +78,275 @@ export interface ZoneDef {
   name: string;
   cols: number;
   rows: number;
-  layout: number[][]; // base tile id per cell
-  decor: number[][]; // decor tile id per cell (-1 = none)
+  floor: (AtlasSlice | null)[][];
+  decor: (AtlasSlice | null)[][];
   anchors: Partial<Record<RoomId, { col: number; row: number }>>;
 }
 
-// ============================================================================
-// INTERIOR — existing 24×16 layout moved here verbatim from rooms.ts
-// ============================================================================
+const COLS = 32;
+const ROWS = 22;
 
-const F = TILE.FLOOR;
-const W = TILE.WALL_SOLID;
+// Empty grid helper.
+function grid<T>(filler: T): T[][] {
+  return Array.from({ length: ROWS }, () => new Array(COLS).fill(filler));
+}
 
-const INTERIOR_COLS = 24;
-const INTERIOR_ROWS = 22;
+// Per-region floor map. Cells outside any region are null (which the
+// renderer treats as exterior grass — handled by drawMap with a flat green
+// rectangle, since LimeZu Modern Interiors doesn't ship grass tiles).
+type Region = {
+  id: RoomId;
+  colMin: number;
+  colMax: number;
+  rowMin: number;
+  rowMax: number;
+  floor: AtlasSlice;
+};
 
-// Open-plan interior (D1):
-// - Outer walls only on row 0, row 21, col 0, and col 23.
-// - The row-7 horizontal wall is gone — the top half (rows 1-14) is one large
-//   floor housing the IDE, Ops Center, and Knowledge Base clusters.
-// - Row 15 is a half-open partition into the Lounge with a 3-tile gap at
-//   cols 11-13 (was 1-tile gap).
-// - Row 21 keeps the plaza-door gap at col 12.
-const INTERIOR_LAYOUT: number[][] = [
-  [W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W, W],
-  [W, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, W],
-  [W, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, W],
-  [W, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, W],
-  [W, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, W],
-  [W, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, W],
-  [W, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, W],
-  [W, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, W],
-  [W, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, W],
-  [W, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, W],
-  [W, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, W],
-  [W, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, W],
-  [W, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, W],
-  [W, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, W],
-  [W, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, W],
-  // row 15: partition between main floor + Lounge, 3-tile gap at cols 11-13
-  [W, W, W, W, W, W, W, W, W, W, W, F, F, F, W, W, W, W, W, W, W, W, W, W],
-  // rows 16–20 — Lounge floor
-  [W, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, W],
-  [W, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, W],
-  [W, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, W],
-  [W, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, W],
-  [W, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, W],
-  // row 21: bottom wall with door-gap at col 12 → plaza
-  [W, W, W, W, W, W, W, W, W, W, W, W, F, W, W, W, W, W, W, W, W, W, W, W],
+const TOP_ROOMS: Region[] = [
+  { id: "library",     colMin: 2,  colMax: 9,  rowMin: 4, rowMax: 9, floor: FLOOR_WOOD_LIGHT },
+  { id: "coding_room", colMin: 10, colMax: 13, rowMin: 4, rowMax: 9, floor: FLOOR_WOOD_DARK },
+  { id: "desk",        colMin: 14, colMax: 21, rowMin: 4, rowMax: 9, floor: FLOOR_OFFICE_GREY },
+  { id: "cinema",      colMin: 22, colMax: 29, rowMin: 4, rowMax: 9, floor: FLOOR_WOOD_LIGHT },
 ];
-
-const INTERIOR_DECOR: number[][] = Array.from({ length: INTERIOR_ROWS }, () =>
-  new Array(INTERIOR_COLS).fill(-1),
-);
-
-function p2(grid: number[][], col: number, row: number, a: number, b: number) {
-  grid[row][col] = a;
-  grid[row + 1][col] = b;
-}
-function p1(grid: number[][], col: number, row: number, t: number) {
-  grid[row][col] = t;
-}
-
-// D2 — Per-room furniture. CP4: each room uses a distinct arrangement and
-// the WorldScene.drawMap pass tints decor by room accent so rooms read as
-// visually different even though we're drawing from one tileset.
-//
-// Workshop (coding_room, top-left, anchor col 4 row 4) — row of workbenches
-// pushed against the top wall so there's open floor for pathing.
-p2(INTERIOR_DECOR, 2, 1, TILE.DESK_TOP, TILE.DESK_BOTTOM);
-p2(INTERIOR_DECOR, 4, 1, TILE.DESK_TOP, TILE.DESK_BOTTOM);
-p2(INTERIOR_DECOR, 6, 1, TILE.DESK_TOP, TILE.DESK_BOTTOM);
-// Anvils on the south side to reinforce "maker space" feel.
-p1(INTERIOR_DECOR, 3, 4, TILE.GEAR_TOP);
-p1(INTERIOR_DECOR, 7, 4, TILE.GEAR_TOP);
-
-// Control Room (desk, top-center, anchor col 11 row 4) — tight 2×2 desk
-// cluster with a rug carpet patch. The monitors read as "command center".
-p2(INTERIOR_DECOR, 10, 2, TILE.DESK_TOP, TILE.DESK_BOTTOM);
-p2(INTERIOR_DECOR, 12, 2, TILE.DESK_TOP, TILE.DESK_BOTTOM);
-p1(INTERIOR_DECOR, 11, 4, TILE.RUG);
-p1(INTERIOR_DECOR, 12, 4, TILE.RUG);
-p1(INTERIOR_DECOR, 13, 4, TILE.RUG);
-
-// Library (top-right, anchor col 19 row 4) — two shelf-walls to make a
-// proper reading stack. Plants flank the aisle.
-p2(INTERIOR_DECOR, 16, 1, TILE.BOOKSHELF_TOP, TILE.BOOKSHELF_BOTTOM);
-p2(INTERIOR_DECOR, 18, 1, TILE.BOOKSHELF_TOP, TILE.BOOKSHELF_BOTTOM);
-p2(INTERIOR_DECOR, 20, 1, TILE.BOOKSHELF_TOP, TILE.BOOKSHELF_BOTTOM);
-p2(INTERIOR_DECOR, 22, 1, TILE.BOOKSHELF_TOP, TILE.BOOKSHELF_BOTTOM);
-p1(INTERIOR_DECOR, 17, 4, TILE.PLANT);
-p1(INTERIOR_DECOR, 21, 4, TILE.PLANT);
-
-// Kitchen (tool_workshop, bottom-left, anchor col 5 row 12) — bookshelves
-// double as counter cabinets along the top wall of the room; plants =
-// herbs. Rug strip is the tile "path".
-p2(INTERIOR_DECOR, 2, 8, TILE.BOOKSHELF_TOP, TILE.BOOKSHELF_BOTTOM);
-p2(INTERIOR_DECOR, 4, 8, TILE.BOOKSHELF_TOP, TILE.BOOKSHELF_BOTTOM);
-p2(INTERIOR_DECOR, 6, 8, TILE.BOOKSHELF_TOP, TILE.BOOKSHELF_BOTTOM);
-p2(INTERIOR_DECOR, 8, 8, TILE.BOOKSHELF_TOP, TILE.BOOKSHELF_BOTTOM);
-p1(INTERIOR_DECOR, 3, 11, TILE.PLANT);
-p1(INTERIOR_DECOR, 10, 11, TILE.PLANT);
-for (let c = 2; c <= 10; c++) {
-  if (INTERIOR_DECOR[12][c] === -1) p1(INTERIOR_DECOR, c, 12, TILE.RUG);
-}
-
-// Test Rig (bottom-right, anchor col 17 row 12) — two lab-bench pairs
-// plus a gear as a stand-in for lab equipment. Col-14 bench moved
-// elsewhere so the Meeting Room pocket has space.
-p2(INTERIOR_DECOR, 17, 9, TILE.LAB_TOP, TILE.LAB_BOTTOM);
-p2(INTERIOR_DECOR, 20, 9, TILE.LAB_TOP, TILE.LAB_BOTTOM);
-p1(INTERIOR_DECOR, 18, 12, TILE.GEAR_TOP);
-p1(INTERIOR_DECOR, 21, 12, TILE.GEAR_TOP);
-
-// Meeting Room (anchor col 13 row 8) — tiny round-table pocket. Put the
-// LAB_TOP tile at (14,7) as a visual centerpiece "round table" and
-// cluster chairs + rug around it. NPCs target (13, 8) so keep that
-// walkable.
-p1(INTERIOR_DECOR, 14, 7, TILE.LAB_TOP);
-p1(INTERIOR_DECOR, 14, 8, TILE.RUG);
-p1(INTERIOR_DECOR, 15, 8, TILE.RUG);
-p1(INTERIOR_DECOR, 14, 9, TILE.RUG);
-p1(INTERIOR_DECOR, 15, 9, TILE.RUG);
-
-// D3 — Aisle markings. RUG tiles are walkable; skip cells already claimed by
-// workstation decor so we don't overwrite a DESK/GEAR/LAB.
-//   Main aisle: row 6, cols 3-20 — open row between top and bottom halves.
-for (let c = 3; c <= 20; c++) {
-  if (INTERIOR_DECOR[6][c] === -1) p1(INTERIOR_DECOR, c, 6, TILE.RUG);
-}
-//   Lounge threshold aisle: row 13, cols 3-20.
-for (let c = 3; c <= 20; c++) {
-  if (INTERIOR_DECOR[13][c] === -1) p1(INTERIOR_DECOR, c, 13, TILE.RUG);
-}
-//   Central corridor: col 11, rows 7-12 (connects the two aisles).
-for (let r = 7; r <= 12; r++) {
-  if (INTERIOR_DECOR[r][11] === -1) p1(INTERIOR_DECOR, 11, r, TILE.RUG);
-}
-
-// Cinema — screen panels along the top wall + 8 chairs in two rows of 4.
-// Row 16 has the "screen" (bookshelves stand in for tall panels), row 18/19
-// hold the seats. Aisle down the middle (col 11-12) keeps the door-gap walkable.
-p1(INTERIOR_DECOR, 4, 16, TILE.BOOKSHELF_TOP);
-p1(INTERIOR_DECOR, 7, 16, TILE.BOOKSHELF_TOP);
-p1(INTERIOR_DECOR, 16, 16, TILE.BOOKSHELF_TOP);
-p1(INTERIOR_DECOR, 19, 16, TILE.BOOKSHELF_TOP);
-// Seating is drawn as RUG tiles (which are walkable — NPCs need to stand on
-// the tile to sit on the seat) rather than CHAIR tiles (which block movement).
-// The visual is a carpet patch suggesting "this is a seat".
-// Row 18 seats
-p1(INTERIOR_DECOR, 4, 18, TILE.RUG);
-p1(INTERIOR_DECOR, 7, 18, TILE.RUG);
-p1(INTERIOR_DECOR, 16, 18, TILE.RUG);
-p1(INTERIOR_DECOR, 19, 18, TILE.RUG);
-// Row 19 seats
-p1(INTERIOR_DECOR, 4, 19, TILE.RUG);
-p1(INTERIOR_DECOR, 7, 19, TILE.RUG);
-p1(INTERIOR_DECOR, 16, 19, TILE.RUG);
-p1(INTERIOR_DECOR, 19, 19, TILE.RUG);
-
-// ============================================================================
-// EXTERIOR — wrap the interior with grass + a south path. CP5.
-// ============================================================================
-//
-// The interior layout above stays byte-for-byte identical. We compose a
-// new zone that pads the interior with `EXT_ROWS_TOP` rows of grass above
-// and `EXT_ROWS_BOTTOM` rows below (no side padding — the map already has
-// plenty of horizontal slack). Anchors get shifted by EXT_ROWS_TOP so
-// existing ROOM_ANCHORS in rooms.ts (which read from INTERIOR_ZONE.anchors)
-// keep pointing to the right interior cell.
-
-const EXT_ROWS_TOP = 3;
-const EXT_ROWS_BOTTOM = 5;
-const EXT_COLS = INTERIOR_COLS;
-const EXT_TOTAL_ROWS = INTERIOR_ROWS + EXT_ROWS_TOP + EXT_ROWS_BOTTOM;
-
-// Build the wrapped layout: grass rows, then interior (with walls intact),
-// then grass + path rows. Col 12's south wall door gap (original row 21)
-// becomes a path from there down to the bottom edge.
-const EXT_LAYOUT: number[][] = Array.from({ length: EXT_TOTAL_ROWS }, (_, r) => {
-  // Interior rows sit in [EXT_ROWS_TOP, EXT_ROWS_TOP + INTERIOR_ROWS).
-  const interiorRow = r - EXT_ROWS_TOP;
-  if (interiorRow >= 0 && interiorRow < INTERIOR_ROWS) {
-    return INTERIOR_LAYOUT[interiorRow].slice();
-  }
-  // Exterior row — all grass by default.
-  return new Array(EXT_COLS).fill(EXT_GRASS);
-});
-
-const EXT_DECOR: number[][] = Array.from({ length: EXT_TOTAL_ROWS }, (_, r) => {
-  const interiorRow = r - EXT_ROWS_TOP;
-  if (interiorRow >= 0 && interiorRow < INTERIOR_ROWS) {
-    return INTERIOR_DECOR[interiorRow].slice();
-  }
-  return new Array(EXT_COLS).fill(-1);
-});
-
-// Carve a 2-tile-wide dirt path from the south door-gap (original interior
-// row 21, col 12 — which is shifted-row 21+EXT_ROWS_TOP in the wrapped
-// layout) straight down to the bottom edge.
-const DOOR_COL = 12;
-const PATH_START_ROW = EXT_ROWS_TOP + INTERIOR_ROWS; // first exterior row below the south wall
-for (let r = PATH_START_ROW; r < EXT_TOTAL_ROWS; r++) {
-  EXT_LAYOUT[r][DOOR_COL] = EXT_PATH;
-  EXT_LAYOUT[r][DOOR_COL + 1] = EXT_PATH;
-}
-
-// Sprinkle a few trees around the building so the exterior doesn't look
-// empty. Trees live in the decor layer so NPCs can walk on their base tile;
-// WorldScene draws them at a higher depth. They're visual-only for now —
-// walkability is driven by the base layout (EXT_GRASS is walkable).
-const TREE_CELLS: Array<[number, number]> = [
-  [2, 1], [5, 0], [8, 1], [15, 0], [19, 1], [22, 1],   // north
-  [1, PATH_START_ROW + 2], [3, PATH_START_ROW + 4],    // south-west
-  [6, PATH_START_ROW + 1], [9, PATH_START_ROW + 3],
-  [16, PATH_START_ROW + 2], [19, PATH_START_ROW + 4],  // south-east
-  [22, PATH_START_ROW + 1],
+const BOTTOM_ROOMS: Region[] = [
+  { id: "tool_workshop", colMin: 2,  colMax: 9,  rowMin: 13, rowMax: 18, floor: FLOOR_TILE_TERRACOTTA },
+  { id: "meeting_room",  colMin: 10, colMax: 13, rowMin: 13, rowMax: 18, floor: FLOOR_CARPET_GOLD },
+  { id: "testing_lab",   colMin: 14, colMax: 21, rowMin: 13, rowMax: 18, floor: FLOOR_OFFICE_GREY },
+  // Reception room — currently re-uses cinema's RoomId since we don't have
+  // a "reception" RoomId. Keep it as a plain spare for now; pathfinding
+  // works because the cells are walkable.
 ];
-for (const [col, row] of TREE_CELLS) {
-  if (row >= 0 && row < EXT_TOTAL_ROWS && col >= 0 && col < EXT_COLS) {
-    EXT_DECOR[row][col] = EXT_TREE;
+const ROOMS: Region[] = [...TOP_ROOMS, ...BOTTOM_ROOMS];
+
+// Build the floor + wall layer.
+const FLOOR: (AtlasSlice | null)[][] = grid<AtlasSlice | null>(null);
+const DECOR: (AtlasSlice | null)[][] = grid<AtlasSlice | null>(null);
+
+// Paint room floors.
+for (const r of ROOMS) {
+  for (let row = r.rowMin; row <= r.rowMax; row++) {
+    for (let col = r.colMin; col <= r.colMax; col++) {
+      FLOOR[row][col] = r.floor;
+    }
   }
 }
 
-// Shift anchors down by EXT_ROWS_TOP so RoomId → cell lookup lands inside
-// the wrapped interior (the original anchor coords are interior-relative).
-function shiftAnchor(a: { col: number; row: number }) {
-  return { col: a.col, row: a.row + EXT_ROWS_TOP };
+// Paint corridor (row 11) using neutral grey.
+for (let col = 1; col < COLS - 1; col++) {
+  FLOOR[11][col] = FLOOR_OFFICE_GREY;
 }
+
+// Building outer walls — top row 3, bottom row 19, sides cols 1 and COLS-2.
+// Outer rows of the building are dedicated to wall tiles; interior rooms
+// sit inside this perimeter.
+const BUILDING_TOP_ROW = 3;
+const BUILDING_BOT_ROW = 19;
+const BUILDING_LEFT_COL = 1;
+const BUILDING_RIGHT_COL = COLS - 2; // 30
+
+// Top + bottom horizontal walls.
+for (let col = BUILDING_LEFT_COL; col <= BUILDING_RIGHT_COL; col++) {
+  FLOOR[BUILDING_TOP_ROW][col] = WALL_TOP;
+  FLOOR[BUILDING_BOT_ROW][col] = WALL_BOTTOM;
+}
+// Side walls.
+for (let row = BUILDING_TOP_ROW; row <= BUILDING_BOT_ROW; row++) {
+  FLOOR[row][BUILDING_LEFT_COL] = WALL_LEFT;
+  FLOOR[row][BUILDING_RIGHT_COL] = WALL_RIGHT;
+}
+// Corners.
+FLOOR[BUILDING_TOP_ROW][BUILDING_LEFT_COL] = WALL_CORNER_TL;
+FLOOR[BUILDING_TOP_ROW][BUILDING_RIGHT_COL] = WALL_CORNER_TR;
+FLOOR[BUILDING_BOT_ROW][BUILDING_LEFT_COL] = WALL_CORNER_BL;
+FLOOR[BUILDING_BOT_ROW][BUILDING_RIGHT_COL] = WALL_CORNER_BR;
+
+// Front door — south wall at col 16, walkable gap.
+const FRONT_DOOR_COL = 16;
+FLOOR[BUILDING_BOT_ROW][FRONT_DOOR_COL] = DOOR_OPEN;
+
+// Internal walls between rooms and corridor.
+//   - Row 10 (between top rooms and corridor): wall body, with one door
+//     per top room into the corridor.
+//   - Row 12 (between corridor and bottom rooms): same.
+//   - Vertical walls between adjacent rooms (top + bottom rows).
+for (let col = BUILDING_LEFT_COL + 1; col < BUILDING_RIGHT_COL; col++) {
+  FLOOR[10][col] = WALL_T_SOUTH;
+  FLOOR[12][col] = WALL_T_NORTH;
+}
+
+// Doors from top rooms → corridor (at the centerish col of each room).
+const TOP_DOOR_COLS = [5, 11, 17, 25];
+for (const c of TOP_DOOR_COLS) FLOOR[10][c] = DOOR_OPEN;
+const BOT_DOOR_COLS = [5, 11, 17, 25];
+for (const c of BOT_DOOR_COLS) FLOOR[12][c] = DOOR_OPEN;
+
+// Vertical walls between adjacent rooms in the same row.
+function vSplit(rowStart: number, rowEnd: number, col: number) {
+  for (let r = rowStart; r <= rowEnd; r++) {
+    FLOOR[r][col] = WALL_LEFT; // any vertical wall body works
+  }
+}
+// Top row splits at col 9-10 boundary (Library|Workshop), 13-14 (Workshop|Control), 21-22 (Control|Lounge)
+vSplit(4, 9, 10);
+vSplit(4, 9, 14);
+vSplit(4, 9, 22);
+// Bottom row splits same boundaries.
+vSplit(13, 18, 10);
+vSplit(13, 18, 14);
+vSplit(13, 18, 22);
+
+// Exterior path tiles south of the front door — path runs from the door
+// down through the south grass band to the map edge.
+for (let row = BUILDING_BOT_ROW + 1; row < ROWS; row++) {
+  FLOOR[row][FRONT_DOOR_COL] = STONE_PATH;
+  FLOOR[row][FRONT_DOOR_COL + 1] = STONE_PATH;
+}
+
+// =============================================================================
+// Per-room decor placements. Furniture lives on the decor layer; cells
+// it covers become non-walkable so NPCs path around them. Multi-tile
+// pieces (FRIDGE 1x2, ROUND_TABLE 2x2, etc.) need only their TOP-LEFT
+// cell marked — drawSlice expands the span at render time, but we ALSO
+// need to mark the additional cells decor != null for walkability.
+// =============================================================================
+
+const place = (col: number, row: number, slice: AtlasSlice) => {
+  DECOR[row][col] = slice;
+  // For multi-tile sprites, mark the covered cells as occupied too.
+  const sc = slice.spanCols ?? 1;
+  const sr = slice.spanRows ?? 1;
+  for (let dr = 0; dr < sr; dr++) {
+    for (let dc = 0; dc < sc; dc++) {
+      if (dc === 0 && dr === 0) continue;
+      DECOR[row + dr][col + dc] = slice; // same slice ref — drawMap skips
+                                          // these because the slice is also
+                                          // drawn at the top-left, but
+                                          // walkability sees them as blocked.
+    }
+  }
+};
+
+// --- Library (rows 4-9, cols 2-9) — bookshelves along the north wall + a
+//     reading table near the door.
+place(3, 4, BOOKSHELF_TALL);
+place(5, 4, BOOKSHELF_TALL);
+place(7, 4, BOOKSHELF_TALL);
+place(4, 7, READING_TABLE);
+
+// --- Workshop (rows 4-9, cols 10-13) — tight 4-col room. Two desks
+//     along the north wall, each with a monitor.
+place(11, 4, DESK_TOP_WOOD);
+place(11, 5, DESK_BOTTOM_WOOD);
+place(11, 4, MONITOR_ON);
+
+// --- Control Room (rows 4-9, cols 14-21) — bank of grey desks +
+//     monitors + a server rack.
+place(15, 4, DESK_TOP_GREY);
+place(15, 5, DESK_BOTTOM_GREY);
+place(15, 4, MONITOR_ON);
+place(17, 4, DESK_TOP_GREY);
+place(17, 5, DESK_BOTTOM_GREY);
+place(17, 4, MONITOR_ON);
+place(19, 4, DESK_TOP_GREY);
+place(19, 5, DESK_BOTTOM_GREY);
+place(19, 4, MONITOR_ON);
+place(20, 7, SERVER_RACK);
+place(15, 8, OFFICE_PLANT_TALL);
+
+// --- Lounge (rows 4-9, cols 22-29) — couches around a coffee table + TV.
+place(23, 4, TV_STAND);
+place(23, 7, COUCH_LEFT);
+place(24, 7, COUCH_MID);
+place(25, 7, COUCH_RIGHT);
+place(24, 5, COFFEE_TABLE);
+
+// --- Kitchen (rows 13-18, cols 2-9) — fridge + stove + sink along north,
+//     dining table center.
+place(3, 13, FRIDGE);
+place(5, 13, STOVE);
+place(6, 13, KITCHEN_SINK);
+place(4, 16, KITCHEN_TABLE);
+
+// --- Meeting Room (rows 13-18, cols 10-13) — round table center.
+place(11, 15, ROUND_TABLE);
+
+// --- Test Rig (rows 13-18, cols 14-21) — lab benches + tall machines.
+place(15, 13, LAB_MACHINE_TALL);
+place(17, 14, LAB_BENCH);
+place(18, 14, MICROSCOPE);
+place(19, 13, LAB_MACHINE_TALL);
+place(15, 17, FILE_CABINET);
+place(20, 17, PRINTER);
+
+// =============================================================================
+// Anchors — where each room's NPC ends up by default. Placed inside the
+// room region, near the center, on a known walkable cell.
+// =============================================================================
+const ANCHORS: Partial<Record<RoomId, { col: number; row: number }>> = {
+  library:       { col: 5,  row: 6  },
+  coding_room:   { col: 11, row: 6  },
+  desk:          { col: 17, row: 6  },
+  cinema:        { col: 25, row: 6  },
+  tool_workshop: { col: 5,  row: 16 },
+  meeting_room:  { col: 11, row: 16 },
+  testing_lab:   { col: 17, row: 16 },
+};
+
+// Exit anchor — used by walk-in / walk-out. NPCs walk to/from this cell
+// outside the building, then fade.
+export const EXTERIOR_ANCHORS = {
+  entry: { col: FRONT_DOOR_COL, row: ROWS - 1 },
+  exit: { col: FRONT_DOOR_COL, row: ROWS - 1 },
+};
+
+// Backwards-compat constant some legacy code still imports.
+export const ROW_SHIFT_FROM_INTERIOR = 0;
 
 export const INTERIOR_ZONE: ZoneDef = {
   id: "interior",
   name: "Agent Ops",
-  cols: EXT_COLS,
-  rows: EXT_TOTAL_ROWS,
-  layout: EXT_LAYOUT,
-  decor: EXT_DECOR,
-  anchors: {
-    coding_room: shiftAnchor({ col: 4, row: 4 }),
-    desk: shiftAnchor({ col: 11, row: 4 }),
-    library: shiftAnchor({ col: 19, row: 4 }),
-    tool_workshop: shiftAnchor({ col: 5, row: 12 }),
-    testing_lab: shiftAnchor({ col: 17, row: 12 }),
-    cinema: shiftAnchor({ col: 11, row: 19 }),
-    meeting_room: shiftAnchor({ col: 13, row: 8 }),
-  },
+  cols: COLS,
+  rows: ROWS,
+  floor: FLOOR,
+  decor: DECOR,
+  anchors: ANCHORS,
 };
-
-// Exported for WorldScene's walk-in/out: the path tile just south of the
-// door, shifted to wrapped-layout coords.
-export const EXTERIOR_ANCHORS = {
-  entry: { col: DOOR_COL, row: EXT_TOTAL_ROWS - 1 },
-  exit:  { col: DOOR_COL, row: EXT_TOTAL_ROWS - 1 },
-};
-
-export const ROW_SHIFT_FROM_INTERIOR = EXT_ROWS_TOP;
 
 export const ZONES: Record<ZoneId, ZoneDef> = {
   interior: INTERIOR_ZONE,
 };
 
+// =============================================================================
+// Walkability
+// =============================================================================
+//
+// Slice equality is reference equality because every TILE_* in
+// limezu-tiles.ts is a single shared object literal. We use Set lookups
+// for blocking/walkable membership.
+
+const BLOCKING_FLOOR = new Set<AtlasSlice>([
+  WALL_TOP,
+  WALL_BOTTOM,
+  WALL_LEFT,
+  WALL_RIGHT,
+  WALL_CORNER_TL,
+  WALL_CORNER_TR,
+  WALL_CORNER_BL,
+  WALL_CORNER_BR,
+  WALL_T_NORTH,
+  WALL_T_SOUTH,
+]);
+
 export function isWalkableIn(zone: ZoneDef, col: number, row: number): boolean {
   if (col < 0 || col >= zone.cols || row < 0 || row >= zone.rows) return false;
-  const floor = zone.layout[row][col];
-  if (floor === TILE.WALL_SOLID || floor === TILE.WALL_TOP || floor === TILE.WALL_LOW) {
-    return false;
-  }
-  const dec = zone.decor[row][col];
-  if (dec !== -1) {
-    if (dec === TILE.RUG || dec === TILE.DOOR_OPEN) return true;
-    // Trees are visual-only: NPCs can walk past the trunk cell in CP5
-    // because there's no hard collision model for the trunk anyway —
-    // the sprite draws at the cell origin and doesn't occlude pathing.
-    if (dec === EXT_TREE) return true;
-    return false;
-  }
+  const f = zone.floor[row][col];
+  // null cells are exterior grass — walkable.
+  if (f && BLOCKING_FLOOR.has(f)) return false;
+  // Decor that's anything other than null blocks. We don't currently mark
+  // any decor as walkable; if we add rugs/posters we'll add a WALKABLE_DECOR
+  // set similar to BLOCKING_FLOOR.
+  const d = zone.decor[row][col];
+  if (d) return false;
   return true;
 }
-

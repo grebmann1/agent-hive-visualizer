@@ -9,19 +9,15 @@ import { useAgentStore } from "../stores/useAgentStore";
 import { useGameStore } from "../stores/useGameStore";
 import { buildLiveGreeting, useNpcStore } from "../stores/useNpcStore";
 import { useWorldBus } from "../stores/useWorldBus";
-import { GB, NEUTRAL_FLOOR_TINT, ROOM_PALETTE, TILE_SIZE } from "./palette";
+import { GB, TILE_SIZE } from "./palette";
 import { type NpcDef } from "./npcs";
 import { bfs } from "./pathfind";
 import {
   buildCharacterSheetFromTile,
   DEFAULT_CHARACTER_TILE,
-  EXT_PATH,
-  EXT_TREE,
-  EXTERIOR_TILE_SPRITE,
-  TILE,
-  TILESET_URL,
 } from "./pixelArt";
-import { ROOM_ANCHORS, roomIdForCell } from "./rooms";
+import { preloadAtlases, drawSlice } from "./atlas";
+import { ROOM_ANCHORS } from "./rooms";
 import { EXTERIOR_ANCHORS, INTERIOR_ZONE, isWalkableIn, type ZoneDef } from "./zones";
 import {
   type ChoreoHandle,
@@ -162,10 +158,14 @@ export class WorldScene extends Phaser.Scene {
   }
 
   preload() {
-    // Kenney Tiny Dungeon tilesheet: 12 cols × 11 rows of 16×16 tiles,
-    // packed with no spacing. Character sheets are now synthesized at runtime
-    // from individual tiles in this image — no separate character base asset.
-    this.load.spritesheet(TILESET_KEY, TILESET_URL, {
+    // LimeZu pipeline: load every atlas in the manifest. Each atlas is a
+    // 16×16 spritesheet; preloadAtlases reads grid dims from the manifest
+    // and registers a Phaser texture per atlas key.
+    preloadAtlases(this);
+    // Kenney Tiny Dungeon tilesheet — kept ONLY as the source for
+    // procedural character sprites until CP8 swaps in LimeZu's premade
+    // character sheets. Once that swap lands, this load goes away.
+    this.load.spritesheet(TILESET_KEY, "/assets/tilesets/tiny-dungeon.png", {
       frameWidth: TILE_SIZE,
       frameHeight: TILE_SIZE,
     });
@@ -434,64 +434,40 @@ export class WorldScene extends Phaser.Scene {
   // map rendering
   // --------------------------------------------------------------------
   private drawMap() {
-    const { layout, decor, cols, rows } = this.zone;
-    // Tints for the exterior tile classes. Grass = classic pastel green,
-    // path = dusty tan-brown, tree canopy = a darker green so it stands
-    // out from the grass base.
-    const GRASS_TINT = 0x8bb04a;
-    const PATH_TINT = 0xb8956a;
-    const TREE_TINT = 0x3d6b2a;
+    const { floor, decor, cols, rows } = this.zone;
+    const GRASS_FILL = 0x8bb04a;
+
+    // Pass 1 — floor + walls. null cells are exterior grass; we paint a
+    // flat-color rectangle for those (LimeZu Modern Interiors does not
+    // ship grass tiles). Walls and room floors come from AtlasSlice.
     for (let row = 0; row < rows; row++) {
       for (let col = 0; col < cols; col++) {
-        const id = layout[row][col];
-        // Exterior tiles: look up the real sprite index via the exterior
-        // map, then tint by class. These cells sit outside any ROOM_REGION
-        // so roomIdForCell returns null and they bypass room-tinting.
-        if (id >= 400) {
-          const spriteId = EXTERIOR_TILE_SPRITE[id] ?? TILE.FLOOR;
-          const img = this.add
-            .image(col * TILE_SIZE, row * TILE_SIZE, TILESET_KEY, spriteId)
+        const slice = floor[row][col];
+        if (!slice) {
+          this.add
+            .rectangle(
+              col * TILE_SIZE,
+              row * TILE_SIZE,
+              TILE_SIZE,
+              TILE_SIZE,
+              GRASS_FILL,
+              1,
+            )
             .setOrigin(0, 0)
             .setDepth(0);
-          img.setTint(id === EXT_PATH ? PATH_TINT : GRASS_TINT);
           continue;
         }
-        const img = this.add
-          .image(col * TILE_SIZE, row * TILE_SIZE, TILESET_KEY, id)
-          .setOrigin(0, 0)
-          .setDepth(0);
-        if (isWalkableIn(this.zone, col, row)) {
-          const roomId = roomIdForCell(col, row);
-          const tint = roomId
-            ? ROOM_PALETTE[roomId].floor
-            : NEUTRAL_FLOOR_TINT;
-          img.setTint(tint);
-        }
+        drawSlice(this, slice, col * TILE_SIZE, row * TILE_SIZE, 0);
       }
     }
+
+    // Pass 2 — decor. Drawn at depth 2+row so lower-row sprites overlap
+    // higher-row ones, which gives the cheap fake-isometric stacking.
     for (let row = 0; row < rows; row++) {
       for (let col = 0; col < cols; col++) {
-        const id = decor[row][col];
-        if (id === -1) continue;
-        // Exterior decor (trees) — look up real sprite, tint dark green,
-        // draw at sprite-row depth.
-        if (id >= 400) {
-          const spriteId = EXTERIOR_TILE_SPRITE[id] ?? TILE.FLOOR;
-          const img = this.add
-            .image(col * TILE_SIZE, row * TILE_SIZE, TILESET_KEY, spriteId)
-            .setOrigin(0, 0)
-            .setDepth(2 + row);
-          img.setTint(id === EXT_TREE ? TREE_TINT : GRASS_TINT);
-          continue;
-        }
-        const img = this.add
-          .image(col * TILE_SIZE, row * TILE_SIZE, TILESET_KEY, id)
-          .setOrigin(0, 0)
-          .setDepth(2 + row);
-        const roomId = roomIdForCell(col, row);
-        if (roomId) {
-          img.setTint(ROOM_PALETTE[roomId].floor);
-        }
+        const slice = decor[row][col];
+        if (!slice) continue;
+        drawSlice(this, slice, col * TILE_SIZE, row * TILE_SIZE, 2 + row);
       }
     }
   }
