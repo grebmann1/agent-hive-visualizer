@@ -39,6 +39,8 @@ export interface TileGrid {
 export interface ObjectRect {
   /** True if `collidable` property is true. False rects are render-only or markers. */
   collidable: boolean;
+  /** True if `seat` property is true (or the name is "seat"). */
+  seat: boolean;
   /** Free-form name authored in Tiled. Useful for room anchors etc. */
   name: string;
   /** Pixel coordinates in the map's coord system. */
@@ -66,6 +68,19 @@ export interface RoomAnchorRect {
   anchor: { col: number; row: number };
 }
 
+export interface CellCoord {
+  col: number;
+  row: number;
+}
+
+export interface DeskRect {
+  /** Inclusive cell-coord bounds derived from the rect. */
+  colMin: number;
+  rowMin: number;
+  colMax: number;
+  rowMax: number;
+}
+
 export interface ParsedMap {
   cols: number;
   rows: number;
@@ -82,6 +97,14 @@ export interface ParsedMap {
   blocking: boolean[][];
   /** Named room rects → in-game RoomId, with computed walkable anchor. */
   rooms: RoomAnchorRect[];
+  /** First object named "Start" — used as the exterior spawn rect. */
+  startRect: ObjectRect | null;
+  /** Cell coords of every object with `properties.seat === true` (or
+   *  whose name is "seat" / "Seat"). NPCs claim these post-spawn. */
+  seatCells: CellCoord[];
+  /** Cell-coord bounds of every "Desk" object. Decor only for now;
+   *  exposed for future "highlight desk in use" features. */
+  deskRects: DeskRect[];
 }
 
 // Map of known PNG basenames (as referenced inside the .tmj) → public file
@@ -299,13 +322,18 @@ async function fetchAndParse(url: string): Promise<ParsedMap> {
       const collidable = props.some(
         (p) => p.name === "collidable" && p.value === true,
       );
+      const seatProp = props.some(
+        (p) => p.name === "seat" && p.value === true,
+      );
+      const name = o.name ?? "";
       objects.push({
-        name: o.name ?? "",
+        name,
         x: o.x,
         y: o.y,
         width: o.width,
         height: o.height,
         collidable,
+        seat: seatProp || name.toLowerCase() === "seat",
       });
     }
   }
@@ -327,6 +355,26 @@ async function fetchAndParse(url: string): Promise<ParsedMap> {
     raw.tileheight,
   );
 
+  const startRect =
+    objects.find((o) => o.name.toLowerCase() === "start") ?? null;
+
+  const seatCells = deriveSeatCells(
+    objects,
+    blocking,
+    raw.width,
+    raw.height,
+    raw.tilewidth,
+    raw.tileheight,
+  );
+
+  const deskRects = deriveDeskRects(
+    objects,
+    raw.width,
+    raw.height,
+    raw.tilewidth,
+    raw.tileheight,
+  );
+
   return {
     cols: raw.width,
     rows: raw.height,
@@ -337,7 +385,59 @@ async function fetchAndParse(url: string): Promise<ParsedMap> {
     objects,
     blocking,
     rooms,
+    startRect,
+    seatCells,
+    deskRects,
   };
+}
+
+/** Convert each `seat: true` object to a single tile cell (the cell
+ *  containing the rect's center). Drops out-of-bounds or blocked
+ *  cells, and dedupes — no two seats can occupy the same cell. */
+function deriveSeatCells(
+  objects: ObjectRect[],
+  blocking: boolean[][],
+  cols: number,
+  rows: number,
+  tw: number,
+  th: number,
+): CellCoord[] {
+  const out: CellCoord[] = [];
+  const seen = new Set<string>();
+  for (const obj of objects) {
+    if (!obj.seat) continue;
+    const cx = obj.x + obj.width / 2;
+    const cy = obj.y + obj.height / 2;
+    const col = Math.floor(cx / tw);
+    const row = Math.floor(cy / th);
+    if (col < 0 || col >= cols || row < 0 || row >= rows) continue;
+    if (blocking[row][col]) continue;
+    const key = `${col},${row}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ col, row });
+  }
+  return out;
+}
+
+/** Convert each `Desk` object to its cell-coord bounds. Decor only. */
+function deriveDeskRects(
+  objects: ObjectRect[],
+  cols: number,
+  rows: number,
+  tw: number,
+  th: number,
+): DeskRect[] {
+  const out: DeskRect[] = [];
+  for (const obj of objects) {
+    if (obj.name.toLowerCase() !== "desk") continue;
+    const colMin = Math.max(0, Math.floor(obj.x / tw));
+    const colMax = Math.min(cols - 1, Math.floor((obj.x + obj.width) / tw));
+    const rowMin = Math.max(0, Math.floor(obj.y / th));
+    const rowMax = Math.min(rows - 1, Math.floor((obj.y + obj.height) / th));
+    out.push({ colMin, colMax, rowMin, rowMax });
+  }
+  return out;
 }
 
 /** Derive RoomAnchorRects from named objects whose names match
@@ -369,6 +469,18 @@ function deriveRooms(
     out.push({ id, label: obj.name, colMin, colMax, rowMin, rowMax, anchor });
   }
   return out;
+}
+
+export function findWalkableInRect(
+  blocking: boolean[][],
+  colMin: number,
+  rowMin: number,
+  colMax: number,
+  rowMax: number,
+): { col: number; row: number } | null {
+  const cc = Math.floor((colMin + colMax) / 2);
+  const cr = Math.floor((rowMin + rowMax) / 2);
+  return findWalkable(blocking, cc, cr, colMin, colMax, rowMin, rowMax);
 }
 
 function findWalkable(

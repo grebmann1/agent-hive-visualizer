@@ -219,6 +219,14 @@ export class WorldScene extends Phaser.Scene {
     // the LOADER_COMPLETE event.
     const bundle = await loadInteriorZone();
     this.zone = bundle.zone;
+    // Cache the authored seat cells so claimFreeSeat / cinemaTick / the
+    // post-spawn flow can look them up without re-reading the manifest.
+    this.seatCells = bundle.parsed.seatCells.slice();
+    if (this.seatCells.length === 0 && typeof window !== "undefined") {
+      console.warn(
+        `[world] no seat objects in the .tmj — agents won't claim a desk after spawn.`,
+      );
+    }
 
     // Queue the tileset PNGs as Phaser spritesheets. Each tileset uses
     // its own grid dimensions (the Tiled file says 32x32 globally; this
@@ -300,19 +308,11 @@ export class WorldScene extends Phaser.Scene {
   // random-wander loop so NPCs only move for a concrete reason.
   // --------------------------------------------------------------------
 
-  // The set of walkable tiles representing cinema seats. Kept in seats[] as
-  // "col,row" keys; matches the RUG tiles placed in src/game/zones.ts at
-  // rows 18/19, cols 4/7/16/19.
-  private static readonly CINEMA_SEATS: Array<{ col: number; row: number }> = [
-    { col: 4, row: 18 },
-    { col: 7, row: 18 },
-    { col: 16, row: 18 },
-    { col: 19, row: 18 },
-    { col: 4, row: 19 },
-    { col: 7, row: 19 },
-    { col: 16, row: 19 },
-    { col: 19, row: 19 },
-  ];
+  // Live list of seat cells, populated from `parsed.seatCells` (objects
+  // with `seat: true` in the .tmj). Set in create() once the map loads;
+  // empty until then so claimFreeSeat is a no-op pre-load. The 60s-idle
+  // cinema loop and the post-spawn assignment both walk this list.
+  private seatCells: Array<{ col: number; row: number }> = [];
 
   private startCinemaLoop() {
     if (this.zone.id !== "interior") return;
@@ -358,7 +358,7 @@ export class WorldScene extends Phaser.Scene {
   private claimFreeSeat(
     npcId: string,
   ): { col: number; row: number } | null {
-    for (const seat of WorldScene.CINEMA_SEATS) {
+    for (const seat of this.seatCells) {
       const key = `${seat.col},${seat.row}`;
       if (this.occupiedSeats.has(key)) continue;
       this.occupiedSeats.set(key, npcId);
@@ -708,10 +708,16 @@ export class WorldScene extends Phaser.Scene {
         );
       });
     } else if (isDynamic && !parentId) {
-      // No pending activity — still walk from the exterior entry to the
-      // spawn cell so the arrival reads naturally. Target is the home
-      // cell the NPC *would* have spawned at without walk-in.
-      this.walkNpcToCell(def.id, targetCol, targetRow);
+      // No pending activity — claim a free seat (read from the .tmj's
+      // `seat: true` objects) and walk the agent there. If every seat
+      // is taken, fall back to the home cell so the agent at least
+      // arrives somewhere.
+      const seat = this.claimFreeSeat(def.id);
+      if (seat) {
+        this.walkNpcToCell(def.id, seat.col, seat.row);
+      } else {
+        this.walkNpcToCell(def.id, targetCol, targetRow);
+      }
     }
   }
 

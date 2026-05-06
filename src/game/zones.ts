@@ -4,7 +4,12 @@
 // grid; rendering needs the tilesets list.
 
 import type { RoomId } from "../events/types";
-import { loadTiledMap, type ParsedMap, type TilesetMeta } from "./tiled-loader";
+import {
+  findWalkableInRect,
+  loadTiledMap,
+  type ParsedMap,
+  type TilesetMeta,
+} from "./tiled-loader";
 import { setActiveZone } from "./rooms";
 
 export type ZoneId = "interior";
@@ -73,8 +78,11 @@ export async function loadInteriorZone(): Promise<InteriorZoneBundle> {
   for (const room of parsed.rooms) {
     anchors[room.id] = room.anchor;
   }
-  // Refresh exterior anchor to a walkable cell near the south edge.
-  setExteriorAnchors(pickExteriorAnchor(parsed));
+  // Exterior anchor: prefer the authored "Start" rect from the .tmj
+  // (this is the spawn area for new dynamic NPCs). Fall back to the
+  // largest-component bottom-row picker only if Start is missing —
+  // log so the user notices.
+  setExteriorAnchors(pickStartOrFallback(parsed));
 
   // Reachability check: warn (in dev) for any room whose anchor isn't
   // in the same connected component as the entry. Tiled-side fix: cut
@@ -119,6 +127,37 @@ export async function loadInteriorZone(): Promise<InteriorZoneBundle> {
   // live data.
   setActiveZone(zone, parsed.rooms);
   return cachedBundle;
+}
+
+function pickStartOrFallback(parsed: ParsedMap): {
+  entry: { col: number; row: number };
+  exit: { col: number; row: number };
+} {
+  if (parsed.startRect) {
+    const { x, y, width, height } = parsed.startRect;
+    const colMin = Math.max(0, Math.floor(x / parsed.tileWidth));
+    const colMax = Math.min(
+      parsed.cols - 1,
+      Math.floor((x + width) / parsed.tileWidth),
+    );
+    const rowMin = Math.max(0, Math.floor(y / parsed.tileHeight));
+    const rowMax = Math.min(
+      parsed.rows - 1,
+      Math.floor((y + height) / parsed.tileHeight),
+    );
+    const cell =
+      findWalkableInRect(parsed.blocking, colMin, rowMin, colMax, rowMax) ?? {
+        col: Math.floor((colMin + colMax) / 2),
+        row: Math.floor((rowMin + rowMax) / 2),
+      };
+    return { entry: cell, exit: cell };
+  }
+  if (typeof window !== "undefined") {
+    console.warn(
+      `[zones] no "Start" object in the .tmj — falling back to bottom-row spawn. Add a Start rect in Tiled to control where dynamic NPCs appear.`,
+    );
+  }
+  return pickExteriorAnchor(parsed);
 }
 
 function pickExteriorAnchor(parsed: {
