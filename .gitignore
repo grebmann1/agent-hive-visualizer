@@ -28,6 +28,11 @@
 # the raw asset files; the manifest is committed but the PNGs are not.
 /public/assets/limezu
 
+# Tiled editor project files (local-only; reference paths in ~/Downloads).
+/tiled
+/*.tiled-project
+/*.tiled-session
+
 # misc
 .DS_Store
 *.pem
