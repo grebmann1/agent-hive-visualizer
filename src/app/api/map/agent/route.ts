@@ -30,6 +30,7 @@ import { join } from "node:path";
 import { ALL_TILES } from "../../../../game/limezu-tiles";
 import type { AtlasSlice } from "../../../../game/atlas";
 import manifest from "../../../../game/limezu-manifest.json";
+import { renderMapToPng } from "./render-png";
 
 const BEDROCK_ANTHROPIC_VERSION = "bedrock-2023-05-31";
 
@@ -164,13 +165,22 @@ export async function POST(req: Request) {
 
 type TextBlock = { type: "text"; text: string };
 type ToolUseBlock = { type: "tool_use"; id: string; name: string; input: unknown };
+type ImageBlock = {
+  type: "image";
+  source:
+    | { type: "base64"; media_type: "image/png"; data: string }
+    | { type: "url"; url: string };
+};
+// Tool-result content can be a string OR an array of (text|image) blocks.
+// We use the array form when we want to attach a screenshot of the map.
+type ToolResultContent = string | Array<TextBlock | ImageBlock>;
 type ToolResultBlock = {
   type: "tool_result";
   tool_use_id: string;
-  content: string;
+  content: ToolResultContent;
   is_error?: boolean;
 };
-type ContentBlock = TextBlock | ToolUseBlock | ToolResultBlock;
+type ContentBlock = TextBlock | ToolUseBlock | ToolResultBlock | ImageBlock;
 
 interface MessageParam {
   role: "user" | "assistant";
@@ -279,23 +289,31 @@ async function runAgent(
     // Append assistant turn (with tool_use blocks) to the message history.
     messages.push({ role: "assistant", content: resp.content });
 
-    // Run each tool_use and append the tool_result.
+    // Run each tool_use and append the tool_result. Track whether anything
+    // mutated the map this round so we can attach a screenshot to the
+    // *last* mutating tool's result (one image per round, not per tool).
     const toolResults: ToolResultBlock[] = [];
     let committed = false;
+    let mutatedThisRound = false;
+    let lastMutatingResultIndex = -1;
     for (const block of resp.content) {
       if (block.type !== "tool_use") continue;
       try {
         const outcome = runTool(map, block.name, block.input as Record<string, unknown>);
         send({ type: "tool_result", name: block.name, result: outcome.result });
-        // Stream cell deltas so the editor paints live, before commit.
         if (outcome.changes && outcome.changes.length > 0) {
           send({ type: "cell_changed", cells: outcome.changes });
+          mutatedThisRound = true;
         }
-        toolResults.push({
+        const resultBlock: ToolResultBlock = {
           type: "tool_result",
           tool_use_id: block.id,
           content: JSON.stringify(outcome.result),
-        });
+        };
+        toolResults.push(resultBlock);
+        if (outcome.changes && outcome.changes.length > 0) {
+          lastMutatingResultIndex = toolResults.length - 1;
+        }
         if (block.name === "commit") {
           await writeMap(map);
           send({ type: "map_updated", floor: map.floor, decor: map.decor });
@@ -319,10 +337,66 @@ async function runAgent(
     }
     if (committed) return;
 
+    // Sliding-window screenshot: attach a fresh map PNG to the LAST
+    // mutating tool_result this round, AFTER stripping image blocks
+    // from prior tool_results in the message history. Net effect: at
+    // most one screenshot in the message stream at any given time.
+    if (mutatedThisRound && lastMutatingResultIndex >= 0) {
+      stripPriorImages(messages);
+      try {
+        const png = await renderMapToPng(map);
+        const b64 = png.toString("base64");
+        const original = toolResults[lastMutatingResultIndex];
+        toolResults[lastMutatingResultIndex] = {
+          ...original,
+          content: [
+            { type: "text", text: typeof original.content === "string" ? original.content : "" },
+            {
+              type: "image",
+              source: {
+                type: "base64",
+                media_type: "image/png",
+                data: b64,
+              },
+            },
+          ],
+        };
+        send({ type: "screenshot_attached", bytes: png.byteLength });
+      } catch (err) {
+        // Don't kill the run if rendering fails — proceed without the
+        // image. Surfaces as a non-fatal warning in the chat.
+        const msg = err instanceof Error ? err.message : String(err);
+        send({ type: "text", text: `(screenshot failed: ${msg})` });
+      }
+    }
+
     messages.push({ role: "user", content: toolResults });
   }
 
   send({ type: "error", message: `step cap hit (${cfg.maxSteps})` });
+}
+
+// Sliding-window screenshot retention: scrub all `image` content blocks
+// from the message history, leaving only text + tool_use + non-image
+// tool_result content. Called BEFORE attaching the latest screenshot,
+// so at any given send the model sees just one image.
+function stripPriorImages(messages: MessageParam[]): void {
+  for (const m of messages) {
+    if (typeof m.content === "string") continue;
+    for (const block of m.content as ContentBlock[]) {
+      if (block.type !== "tool_result") continue;
+      if (typeof block.content === "string") continue;
+      // tool_result content was the array form. Drop image blocks.
+      const filtered = block.content.filter((b) => b.type !== "image");
+      // If filtering left only one text block, collapse back to a plain
+      // string for compactness.
+      if (filtered.length === 1 && filtered[0].type === "text") {
+        block.content = filtered[0].text;
+      } else {
+        block.content = filtered;
+      }
+    }
+  }
 }
 
 // =============================================================================
@@ -703,7 +777,10 @@ PROCESS:
 3. Use fillRect for big areas (floors, walls). Use placeTile for individual
    pieces of furniture. Multi-tile sprites (e.g. FRIDGE with spanRows=2,
    ROUND_TABLE with spanCols=2 spanRows=2) only need their top-left placed.
-4. After substantial changes, call getMap() again to verify what you painted.
+4. After mutating tools (placeTile/fillRect/eraseRect), the next user
+   message will include a fresh PNG screenshot of the current map. USE
+   THE SCREENSHOT to verify your work landed correctly. Only the most
+   recent screenshot is kept in context (sliding window N=1).
 5. When satisfied, call commit(reason). The map is NOT saved until commit().
 
 CONSTRAINTS:

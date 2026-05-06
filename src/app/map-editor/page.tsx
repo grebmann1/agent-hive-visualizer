@@ -273,7 +273,7 @@ export default function MapEditorPage() {
   }
 
   return (
-    <div className="min-h-screen bg-page text-ink flex flex-col">
+    <div className="h-screen bg-page text-ink flex flex-col overflow-hidden">
       <Toolbar
         mode={mode}
         onModeChange={setMode}
@@ -1142,6 +1142,7 @@ interface AgentEvent {
     | "tool_use"
     | "tool_result"
     | "cell_changed"
+    | "screenshot_attached"
     | "map_updated"
     | "done"
     | "error";
@@ -1154,6 +1155,7 @@ interface AgentEvent {
   floor?: (AtlasSlice | null)[][];
   decor?: (AtlasSlice | null)[][];
   cells?: Array<{ layer: Layer; col: number; row: number; slice: AtlasSlice | null }>;
+  bytes?: number;
 }
 
 function GeneratorPanel({
@@ -1352,6 +1354,12 @@ function AgentEventLine({ event }: { event: AgentEvent }) {
         </div>
       );
     }
+    case "screenshot_attached":
+      return (
+        <div className="opacity-70 italic text-[10px]">
+          📸 screenshot ({event.bytes ? `${Math.round(event.bytes / 1024)} KB` : "?"}) attached for next agent step
+        </div>
+      );
     case "map_updated":
       return (
         <div className="text-emerald-400">

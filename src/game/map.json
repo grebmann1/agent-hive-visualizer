@@ -431,7 +431,11 @@
       null,
       null,
       null,
-      null,
+      {
+        "atlas": "rb_floors",
+        "col": 7,
+        "row": 7
+      },
       {
         "atlas": "rb_walls",
         "col": 0,
