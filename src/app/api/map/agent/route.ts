@@ -1,6 +1,12 @@
 // POST /api/map/agent — runs an Anthropic agent loop with tools that
 // edit src/game/map.json. Streams progress as Server-Sent Events.
 //
+// Backend: Salesforce internal LLM gateway, which proxies to AWS Bedrock's
+// Anthropic-on-Bedrock messages API. Body shape follows the Bedrock
+// convention (no top-level `model`, includes `anthropic_version`). The
+// SDK isn't used — we POST raw fetches because the SDK assumes
+// api.anthropic.com's URL/body shape.
+//
 // Tools:
 //   - getMap()                        : returns the current map's ASCII view + dims
 //   - listTiles(category?)            : returns named TILE_* with descriptions
@@ -9,7 +15,7 @@
 //   - eraseRect(layer,colMin..)       : clear a rectangle
 //   - commit(reason)                  : declare done; persist map.json
 //
-// Caps: 50 tool-use steps, 30 sec wall clock, 200K input tokens.
+// Caps: 50 tool-use steps, 60 sec wall clock, 200K input tokens.
 //
 // SSE events emitted to the client:
 //   { type: "text", text }
@@ -19,12 +25,13 @@
 //   { type: "done", reason }
 //   { type: "error", message }
 
-import Anthropic from "@anthropic-ai/sdk";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { ALL_TILES } from "../../../../game/limezu-tiles";
 import type { AtlasSlice } from "../../../../game/atlas";
 import manifest from "../../../../game/limezu-manifest.json";
+
+const BEDROCK_ANTHROPIC_VERSION = "bedrock-2023-05-31";
 
 const MAP_PATH = join(process.cwd(), "src", "game", "map.json");
 
@@ -49,16 +56,33 @@ function sseEvent(obj: unknown): string {
   return `data: ${JSON.stringify(obj)}\n\n`;
 }
 
-// Env vars (override-friendly):
-//   ANTHROPIC_API_KEY        — API key (required)
-//   ANTHROPIC_BASE_URL       — alternate API endpoint (defaults to api.anthropic.com)
-//   ANTHROPIC_MODEL          — model id (default: claude-opus-4-7)
+// Env vars:
+//   LLM_GATEWAY_URL          — Salesforce internal gateway base (required)
+//                              e.g. https://eng-ai-model-gateway…/chat/completions
+//                              (we strip /chat/completions and append
+//                               /bedrock/model/{id}/invoke per the Bedrock convention).
+//   LLM_AUTH_TOKEN           — Bearer token for the gateway (required)
+//   LLM_MODEL                — Bedrock model id (default: us.anthropic.claude-opus-4-7)
+//   LLM_EXTRA_HEADERS        — optional JSON object of headers, merged into requests
 //   AGENTQUEST_AGENT_MAX_STEPS / _MAX_INPUT_TOKENS / _WALL_CLOCK_MS — soft caps
 function readAgentConfig() {
+  const gatewayUrl = process.env.LLM_GATEWAY_URL;
+  const authToken = process.env.LLM_AUTH_TOKEN;
+  const model = process.env.LLM_MODEL || "us.anthropic.claude-opus-4-7";
+  let extraHeaders: Record<string, string> = {};
+  if (process.env.LLM_EXTRA_HEADERS) {
+    try {
+      const parsed = JSON.parse(process.env.LLM_EXTRA_HEADERS);
+      if (parsed && typeof parsed === "object") extraHeaders = parsed;
+    } catch {
+      // ignore malformed
+    }
+  }
   return {
-    apiKey: process.env.ANTHROPIC_API_KEY,
-    baseURL: process.env.ANTHROPIC_BASE_URL || undefined,
-    model: process.env.ANTHROPIC_MODEL || "claude-opus-4-7",
+    gatewayUrl,
+    authToken,
+    model,
+    extraHeaders,
     maxSteps: numEnv("AGENTQUEST_AGENT_MAX_STEPS", MAX_STEPS),
     maxInputTokens: numEnv("AGENTQUEST_AGENT_MAX_INPUT_TOKENS", MAX_INPUT_TOKENS),
     wallClockMs: numEnv("AGENTQUEST_AGENT_WALL_CLOCK_MS", WALL_CLOCK_MS),
@@ -74,11 +98,11 @@ function numEnv(key: string, fallback: number): number {
 
 export async function POST(req: Request) {
   const cfg = readAgentConfig();
-  if (!cfg.apiKey) {
+  if (!cfg.gatewayUrl || !cfg.authToken) {
     return new Response(
       JSON.stringify({
         error:
-          "ANTHROPIC_API_KEY is not set in the dev-server environment. Set it (and optionally ANTHROPIC_BASE_URL / ANTHROPIC_MODEL) and restart `npm run dev:web`.",
+          "LLM gateway is not configured. Set LLM_GATEWAY_URL and LLM_AUTH_TOKEN in .env.local and restart `npm run dev:web`.",
       }),
       { status: 500, headers: { "content-type": "application/json" } },
     );
@@ -130,18 +154,47 @@ export async function POST(req: Request) {
 // Agent loop
 // =============================================================================
 
+// Anthropic Messages API content-block + message shapes — minimal subset
+// we exchange with the Bedrock gateway. The gateway requires the same
+// JSON the public Anthropic API uses, just at a different URL with no
+// top-level `model` field and an `anthropic_version` field added.
+
+type TextBlock = { type: "text"; text: string };
+type ToolUseBlock = { type: "tool_use"; id: string; name: string; input: unknown };
+type ToolResultBlock = {
+  type: "tool_result";
+  tool_use_id: string;
+  content: string;
+  is_error?: boolean;
+};
+type ContentBlock = TextBlock | ToolUseBlock | ToolResultBlock;
+
+interface MessageParam {
+  role: "user" | "assistant";
+  content: string | ContentBlock[];
+}
+
+interface ToolDef {
+  name: string;
+  description: string;
+  input_schema: { type: "object"; required?: string[]; properties: Record<string, unknown> };
+}
+
+interface MessagesResponse {
+  id: string;
+  content: ContentBlock[];
+  stop_reason: "end_turn" | "tool_use" | "max_tokens" | "stop_sequence" | string;
+  usage?: { input_tokens?: number; output_tokens?: number };
+}
+
 async function runAgent(
   cfg: ReturnType<typeof readAgentConfig>,
   prompt: string,
   send: (obj: unknown) => void,
 ): Promise<void> {
-  const client = new Anthropic({
-    apiKey: cfg.apiKey,
-    baseURL: cfg.baseURL,
-  });
   send({
     type: "text",
-    text: `Agent starting · model=${cfg.model}${cfg.baseURL ? ` · baseURL=${cfg.baseURL}` : ""}`,
+    text: `Agent starting · model=${cfg.model} · gateway=${cfg.gatewayUrl}`,
   });
   const startedAt = Date.now();
 
@@ -151,15 +204,7 @@ async function runAgent(
   const systemPrompt = buildSystemPrompt();
   const tools = TOOL_DEFS;
 
-  type ContentBlock = Anthropic.ContentBlock;
-  type MessageParam = Anthropic.MessageParam;
-
-  const messages: MessageParam[] = [
-    {
-      role: "user",
-      content: prompt,
-    },
-  ];
+  const messages: MessageParam[] = [{ role: "user", content: prompt }];
 
   let inputTokens = 0;
   for (let step = 0; step < cfg.maxSteps; step++) {
@@ -172,17 +217,23 @@ async function runAgent(
       return;
     }
 
-    const resp = await client.messages.create({
-      model: cfg.model,
-      max_tokens: 4096,
-      system: systemPrompt,
-      tools,
-      messages,
-    });
-    inputTokens += resp.usage.input_tokens ?? 0;
+    let resp: MessagesResponse;
+    try {
+      resp = await bedrockMessages(cfg, {
+        max_tokens: 4096,
+        system: systemPrompt,
+        tools,
+        messages,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      send({ type: "error", message: msg });
+      return;
+    }
+    inputTokens += resp.usage?.input_tokens ?? 0;
 
     // Stream text + tool_use blocks to the client.
-    for (const block of resp.content as ContentBlock[]) {
+    for (const block of resp.content) {
       if (block.type === "text") {
         send({ type: "text", text: block.text });
       } else if (block.type === "tool_use") {
@@ -191,8 +242,6 @@ async function runAgent(
     }
 
     if (resp.stop_reason === "end_turn") {
-      // Claude finished without calling commit — that's an error condition
-      // unless we already committed earlier.
       send({
         type: "done",
         reason: "agent ended turn without calling commit (changes NOT persisted)",
@@ -212,9 +261,9 @@ async function runAgent(
     messages.push({ role: "assistant", content: resp.content });
 
     // Run each tool_use and append the tool_result.
-    const toolResults: Anthropic.ToolResultBlockParam[] = [];
+    const toolResults: ToolResultBlock[] = [];
     let committed = false;
-    for (const block of resp.content as ContentBlock[]) {
+    for (const block of resp.content) {
       if (block.type !== "tool_use") continue;
       try {
         const result = runTool(map, block.name, block.input as Record<string, unknown>);
@@ -250,10 +299,57 @@ async function runAgent(
 }
 
 // =============================================================================
+// Bedrock gateway HTTP — mirrors monaco-editor/packages/components'
+// anthropicBedrock adapter shape. Strips `/chat/completions` from the
+// gateway URL, appends `/bedrock/model/{id}/invoke`. Body uses the
+// Anthropic Messages schema with `anthropic_version` added and `model`
+// removed (the model is in the URL).
+// =============================================================================
+
+function buildBedrockUrl(gatewayUrl: string, model: string): string {
+  const base = gatewayUrl.replace(/\/(?:v\d+\/)?chat\/completions\/?$/, "");
+  return `${base}/bedrock/model/${model}/invoke`;
+}
+
+async function bedrockMessages(
+  cfg: ReturnType<typeof readAgentConfig>,
+  payload: {
+    max_tokens: number;
+    system: string;
+    tools: ToolDef[];
+    messages: MessageParam[];
+  },
+): Promise<MessagesResponse> {
+  const url = buildBedrockUrl(cfg.gatewayUrl as string, cfg.model);
+  const body = {
+    anthropic_version: BEDROCK_ANTHROPIC_VERSION,
+    max_tokens: payload.max_tokens,
+    system: payload.system,
+    tools: payload.tools,
+    messages: payload.messages,
+  };
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${cfg.authToken}`,
+    ...cfg.extraHeaders,
+  };
+  const res = await fetch(url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`LLM gateway ${res.status}: ${text.slice(0, 400)}`);
+  }
+  return (await res.json()) as MessagesResponse;
+}
+
+// =============================================================================
 // Tools
 // =============================================================================
 
-const TOOL_DEFS: Anthropic.Tool[] = [
+const TOOL_DEFS: ToolDef[] = [
   {
     name: "getMap",
     description:
@@ -261,7 +357,7 @@ const TOOL_DEFS: Anthropic.Tool[] = [
     input_schema: {
       type: "object",
       properties: {},
-    } as unknown as Anthropic.Tool["input_schema"],
+    } as ToolDef["input_schema"],
   },
   {
     name: "listTiles",
@@ -275,7 +371,7 @@ const TOOL_DEFS: Anthropic.Tool[] = [
           description: "Optional name-prefix filter (e.g. 'FLOOR_', 'WALL_').",
         },
       },
-    } as unknown as Anthropic.Tool["input_schema"],
+    } as ToolDef["input_schema"],
   },
   {
     name: "placeTile",
@@ -290,7 +386,7 @@ const TOOL_DEFS: Anthropic.Tool[] = [
         row: { type: "number" },
         tile: { type: "string", description: "Named TILE_* from the catalog. Pass 'null' to erase." },
       },
-    } as unknown as Anthropic.Tool["input_schema"],
+    } as ToolDef["input_schema"],
   },
   {
     name: "fillRect",
@@ -307,7 +403,7 @@ const TOOL_DEFS: Anthropic.Tool[] = [
         rowMax: { type: "number" },
         tile: { type: "string" },
       },
-    } as unknown as Anthropic.Tool["input_schema"],
+    } as ToolDef["input_schema"],
   },
   {
     name: "eraseRect",
@@ -323,7 +419,7 @@ const TOOL_DEFS: Anthropic.Tool[] = [
         colMax: { type: "number" },
         rowMax: { type: "number" },
       },
-    } as unknown as Anthropic.Tool["input_schema"],
+    } as ToolDef["input_schema"],
   },
   {
     name: "commit",
@@ -335,7 +431,7 @@ const TOOL_DEFS: Anthropic.Tool[] = [
       properties: {
         reason: { type: "string", description: "1-sentence summary of what was built." },
       },
-    } as unknown as Anthropic.Tool["input_schema"],
+    } as ToolDef["input_schema"],
   },
 ];
 
