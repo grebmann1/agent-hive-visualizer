@@ -60,11 +60,22 @@ const DRAG_THRESHOLD_PX = 4;
 const ZOOM_MIN = 0.5;
 const ZOOM_MAX = 3;
 
-/** 4-char uppercase code used in the always-on overhead pill. Prefers the
- *  NPC's dynamic name suffix (e.g. "Claude-A4" → "A4"); falls back to the
- *  last 4 chars of the id so the code is still stable. */
-function shortCodeFor(id: string): string {
-  const tail = id.replace(/[^A-Za-z0-9]/g, "").slice(-4);
+/** Label shown on the always-on overhead pill. Prefers the basename
+ *  of the agent's working directory (so you see WHAT the agent is
+ *  working on, e.g. "agentquest" or "marketing-site"), then the
+ *  agent's display name, then a stable 4-char id suffix as a last
+ *  resort. Truncated to 14 chars so the pill stays compact. */
+function pillLabelFor(def: {
+  id: string;
+  name?: string;
+  cwd?: string;
+}): string {
+  if (def.cwd) {
+    const base = def.cwd.split(/[/\\]/).filter(Boolean).pop();
+    if (base) return base.slice(0, 14);
+  }
+  if (def.name && def.name.trim()) return def.name.slice(0, 14);
+  const tail = def.id.replace(/[^A-Za-z0-9]/g, "").slice(-4);
   return tail.toUpperCase() || "??";
 }
 
@@ -619,7 +630,7 @@ export class WorldScene extends Phaser.Scene {
     // system font stack so platform color emoji renders natively.
     const overheadBg = this.add.graphics();
     const overheadCodeText = this.add
-      .text(0, 0, shortCodeFor(def.id), {
+      .text(0, 0, pillLabelFor(def as { id: string; name?: string; cwd?: string }), {
         fontFamily: '"Press Start 2P", monospace',
         fontSize: "7px",
         color: "#1b1e2b",
@@ -691,13 +702,19 @@ export class WorldScene extends Phaser.Scene {
       },
     });
 
-    // Replay any pending activity that arrived BEFORE we had a sprite to
-    // animate. Without this, a `tool Bash` event that lands in the 0-5ms
-    // between addDynamic() and the scene's useNpcStore.subscribe firing
-    // gets silently dropped at subscribeStores' `this.npcs.get(id)` check
-    // — the NPC spawns and then just sits there.
+    // Decide where this NPC is going. If there's a pending TOOL event
+    // (Read/Edit/Bash/etc) we route to that tool's room. Otherwise —
+    // including when the only event is a session-start — we claim a
+    // free Desk Seat and walk there. Without this, every dynamic NPC
+    // would walk to the SAME room anchor on session start, which
+    // looked like "two agents at one desk".
     const pending = useAgentStore.getState().activities[def.id];
-    if (pending) {
+    const pendingTool =
+      (pending?.event.metadata as { toolName?: string } | undefined)?.toolName;
+    const dynamicTopLevel = isDynamic && !parentId;
+
+    if (pending && pendingTool) {
+      // Real tool in flight — route to its room.
       this.lastActivityAt.set(def.id, this.time.now);
       this.walkNpcToRoom(def.id, pending.room);
       const pathLen = this.npcPaths.get(def.id)?.length ?? 0;
@@ -707,23 +724,30 @@ export class WorldScene extends Phaser.Scene {
         this.startChoreoFor(live, pending.choreo);
         this.updateOverheadPill(
           def.id,
-          (pending.event.metadata as { toolName?: string } | undefined)
-            ?.toolName,
+          pendingTool,
           pending.event.state,
           false,
         );
       });
-    } else if (isDynamic && !parentId) {
-      // No pending activity — claim a free seat (read from the .tmj's
-      // `seat: true` objects) and walk the agent there. If every seat
-      // is taken, fall back to the home cell so the agent at least
-      // arrives somewhere.
+    } else if (dynamicTopLevel) {
+      // No real tool yet — claim a free seat and walk there. Sub-
+      // agents and static NPCs fall through to the default home cell.
       const seat = this.claimFreeSeat(def.id);
       if (seat) {
         this.walkNpcToCell(def.id, seat.col, seat.row);
+      } else if (typeof window !== "undefined") {
+        console.warn(
+          `[world] no free seat for ${def.id} — ${this.occupiedSeats.size}/${this.seatCells.length} seats taken. Falling back to spawn cell.`,
+        );
+        this.walkNpcToCell(def.id, targetCol, targetRow);
       } else {
         this.walkNpcToCell(def.id, targetCol, targetRow);
       }
+    } else if (pending) {
+      // Pending but no tool (session start, thinking, etc) — leave the
+      // NPC at its spawn cell; the subscribeStores activity feed will
+      // route them on the next real event.
+      this.startChoreoFor(this.npcs.get(def.id)!, pending.choreo);
     }
   }
 
