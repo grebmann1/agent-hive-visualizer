@@ -10,7 +10,7 @@ const pressStart = Press_Start_2P({
 });
 
 export const metadata: Metadata = {
-  title: "AgentQuest — 2D Agent Visualizer",
+  title: "Agent Force HQ — 2D Agent Visualizer",
   description: "A 2D pixel-art world where every AI action becomes visible.",
 };
 

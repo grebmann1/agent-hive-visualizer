@@ -61,6 +61,7 @@ const ROOM_CYCLE: RoomId[] = [
   "library",
   "tool_workshop",
   "testing_lab",
+  "meeting_room",
 ];
 
 // Palette tints for dynamic NPCs — stable hash per id
@@ -130,7 +131,7 @@ export function makeDynamicNpc(input: {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { ROOM_ANCHORS } = require("../game/rooms") as typeof import("../game/rooms");
   const ANCHORS = (Object.keys({
-    library: 0, coding_room: 0, desk: 0, cinema: 0,
+    library: 0, coding_room: 0, desk: 0,
     tool_workshop: 0, meeting_room: 0, testing_lab: 0,
   }) as RoomId[]).reduce<Record<RoomId, { col: number; row: number }>>(
     (acc, id) => {
@@ -166,7 +167,7 @@ export function makeDynamicNpc(input: {
     baseTile,
     greeting: buildGreeting(input.name, input.cmd, input.cwd),
     systemPrompt:
-      "You are an NPC in a 2D game called AgentQuest — you represent an actual Claude CLI process " +
+      "You are an NPC in a 2D game called Agent Force HQ — you represent an actual Claude CLI process " +
       "running on the user's laptop. You are friendly, concise (1-3 short sentences), and kid-friendly. " +
       "When asked what you're doing, make up something plausible for a Claude coding agent " +
       "(reading files, writing code, running tests). Never break character; never say you're an AI.",

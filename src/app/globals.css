@@ -91,7 +91,7 @@ canvas,
   font-size: 11px;
   line-height: 1.4;
   background: var(--accent);
-  color: var(--ink);
+  color: var(--paper-dim);
   border: 2px solid var(--border);
   border-radius: 6px;
   box-shadow: 2px 2px 0 var(--border);
@@ -142,6 +142,7 @@ canvas,
   padding: 4px 8px;
   border: 2px solid var(--border);
   background: var(--paper);
+  color: var(--ink);
   border-radius: 6px;
   box-shadow: 2px 2px 0 var(--border);
   pointer-events: none;
@@ -178,11 +179,35 @@ canvas,
   background-position: 0 0, 2px 2px;
 }
 
-/* Top title bar mimics an OS title strip */
+/* Top title bar — flat dark to match the rest of the dark UI; thin
+   accent underline reads as a "scanline" without the muddy gradient. */
 .title-strip {
-  background: linear-gradient(180deg, var(--ink) 0%, #0e1018 100%);
-  color: var(--paper);
+  background: var(--paper-dim);
+  color: var(--ink);
   border-bottom: 2px solid var(--accent-dark);
+  box-shadow: inset 0 -1px 0 rgba(255, 255, 255, 0.04);
+}
+
+/* HUD marquee — used by the controls hint chip so the available
+   actions roll past instead of crowding the BR corner. */
+@keyframes hudMarquee {
+  0% {
+    transform: translateX(0);
+  }
+  100% {
+    transform: translateX(-50%);
+  }
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 4px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
 }
 
 /* Dialog box — like a Pokemon text window but readable */

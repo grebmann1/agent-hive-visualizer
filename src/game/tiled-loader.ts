@@ -73,6 +73,15 @@ export interface CellCoord {
   row: number;
 }
 
+/** A seat object: cell-coords for pathfinding plus the authored
+ *  pixel-center so the sprite can land exactly on the chair sprite
+ *  (which is usually smaller than a tile and pixel-aligned to one
+ *  corner). */
+export interface SeatCell extends CellCoord {
+  px: number;
+  py: number;
+}
+
 export interface DeskRect {
   /** Inclusive cell-coord bounds derived from the rect. */
   colMin: number;
@@ -99,9 +108,10 @@ export interface ParsedMap {
   rooms: RoomAnchorRect[];
   /** First object named "Start" — used as the exterior spawn rect. */
   startRect: ObjectRect | null;
-  /** Cell coords of every object with `properties.seat === true` (or
-   *  whose name is "seat" / "Seat"). NPCs claim these post-spawn. */
-  seatCells: CellCoord[];
+  /** Every object with `properties.seat === true` (or whose name is
+   *  "seat" / "Seat"), captured as cell + pixel center. NPCs claim
+   *  these post-spawn and rest on the pixel center. */
+  seatCells: SeatCell[];
   /** Cell-coord bounds of every "Desk" object. Decor only for now;
    *  exposed for future "highlight desk in use" features. */
   deskRects: DeskRect[];
@@ -121,6 +131,8 @@ const TILESET_PUBLIC_NAMES: Record<string, string> = {
   // Public-relative names (Tiled's `../ai-office.png` after re-saving).
   "ai-office-items.png": "ai-office-items.png",
   "ai-office.png": "ai-office.png",
+  "ai-office-empty.png": "ai-office-empty.png",
+  "ai-office-collision.png": "ai-office-collision.png",
 };
 
 // External tileset references (Tiled's `.tsx` files) we can't fetch at
@@ -170,9 +182,6 @@ const ROOM_NAME_TO_ID: Record<string, RoomId> = {
   // Sub-agent collaboration — Task tool.
   "meeting room": "meeting_room",
   meeting: "meeting_room",
-  // Idle / completed / waiting.
-  lounge: "cinema",
-  cinema: "cinema",
 };
 
 interface RawTileset {
@@ -192,11 +201,15 @@ interface RawTileLayer {
   height: number;
   data: number[];
   name: string;
+  offsetx?: number;
+  offsety?: number;
 }
 
 interface RawObjectLayer {
   type: "objectgroup";
   name: string;
+  offsetx?: number;
+  offsety?: number;
   objects: Array<{
     name?: string;
     x: number;
@@ -313,10 +326,21 @@ async function fetchAndParse(url: string): Promise<ParsedMap> {
     data: tileLayer.data,
   };
 
+  // The Background tile layer is rendered at world (0,0). Tiled lets
+  // each layer carry its own offsetx/offsety, and authors regularly
+  // place objects against the SHIFTED visual position of the
+  // background. To keep object pixel coords aligned with the tiles
+  // we render at (col*TILE, row*TILE), normalize every layer into
+  // the Background's frame: shift objects by (layer.offset - bg.offset).
+  const bgOX = tileLayer.offsetx ?? 0;
+  const bgOY = tileLayer.offsety ?? 0;
+
   // Flatten object layers.
   const objects: ObjectRect[] = [];
   for (const layer of raw.layers) {
     if (layer.type !== "objectgroup") continue;
+    const dx = (layer.offsetx ?? 0) - bgOX;
+    const dy = (layer.offsety ?? 0) - bgOY;
     for (const o of layer.objects) {
       const props = o.properties ?? [];
       const collidable = props.some(
@@ -328,8 +352,8 @@ async function fetchAndParse(url: string): Promise<ParsedMap> {
       const name = o.name ?? "";
       objects.push({
         name,
-        x: o.x,
-        y: o.y,
+        x: o.x + dx,
+        y: o.y + dy,
         width: o.width,
         height: o.height,
         collidable,
@@ -401,8 +425,8 @@ function deriveSeatCells(
   rows: number,
   tw: number,
   th: number,
-): CellCoord[] {
-  const out: CellCoord[] = [];
+): SeatCell[] {
+  const out: SeatCell[] = [];
   const seen = new Set<string>();
   for (const obj of objects) {
     if (!obj.seat) continue;
@@ -415,7 +439,7 @@ function deriveSeatCells(
     const key = `${col},${row}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push({ col, row });
+    out.push({ col, row, px: cx, py: cy });
   }
   return out;
 }

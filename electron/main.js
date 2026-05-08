@@ -73,7 +73,7 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 820,
-    title: "AgentQuest",
+    title: "Agent Force HQ",
     backgroundColor: "#271d2e",
     // Native title bar with the traffic-light buttons above the content,
     // like any normal Mac app. Matches standard window chrome.

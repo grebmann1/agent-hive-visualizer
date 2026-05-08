@@ -1,10 +1,10 @@
 import type { AgentState, RoomId } from "./types";
 
 export const stateToRoom: Record<AgentState, RoomId> = {
-  // Idle / waiting states send the NPC to the Lounge to chill.
-  idle: "cinema",
-  waiting_for_user: "cinema",
-  completed: "cinema",
+  // Idle / waiting states park the NPC at a desk seat.
+  idle: "desk",
+  waiting_for_user: "desk",
+  completed: "desk",
   thinking: "desk",
   planning: "desk",
   coding: "coding_room",
@@ -60,6 +60,64 @@ export const TOOL_EMOJI: Record<string, string> = {
 export const IDLE_EMOJI = "💭";
 export const ERROR_EMOJI = "❌";
 export const COMPLETED_EMOJI = "✅";
+
+// Human-readable label for an AgentState. Used wherever the raw state
+// id (e.g. "calling_tool") would otherwise leak into UI copy.
+export const stateToLabel: Record<AgentState, string> = {
+  idle: "Idle",
+  waiting_for_user: "Awaiting input",
+  thinking: "Thinking",
+  planning: "Planning",
+  coding: "Coding",
+  reading_file: "Reading",
+  searching: "Searching",
+  calling_tool: "Using tool",
+  talking_to_agent: "Delegating",
+  running_tests: "Testing",
+  debugging: "Debugging",
+  deploying: "Deploying",
+  summarizing: "Summarizing",
+  completed: "Completed",
+  failed: "Failed",
+};
+
+// Human-readable label for a hook tool name. Same role as TOOL_EMOJI:
+// preferred over the state-derived label when a tool is in flight.
+export const TOOL_LABEL: Record<string, string> = {
+  Read: "Reading",
+  Edit: "Editing",
+  Write: "Writing",
+  MultiEdit: "Editing",
+  NotebookEdit: "Editing",
+  Bash: "Running command",
+  Grep: "Searching",
+  Glob: "Globbing",
+  WebFetch: "Fetching",
+  WebSearch: "Searching web",
+  Task: "Delegating",
+  TodoWrite: "Planning",
+};
+
+export function formatState(s: AgentState | undefined): string {
+  if (!s) return "";
+  return stateToLabel[s] ?? s;
+}
+
+export function formatTool(t: string | undefined): string {
+  if (!t) return "";
+  return TOOL_LABEL[t] ?? t;
+}
+
+/** Resolve the human-readable label for an activity. Mirrors
+ *  emojiForActivity — prefers the in-flight tool over the state. */
+export function labelForActivity(
+  toolName: string | undefined,
+  state: AgentState | undefined,
+): string {
+  if (toolName && TOOL_LABEL[toolName]) return TOOL_LABEL[toolName];
+  if (state && stateToLabel[state]) return stateToLabel[state];
+  return "";
+}
 
 /** Resolve the emoji for an activity's current state. Prefers the tool
  *  name (coming from event.metadata.toolName) over the state lookup. */

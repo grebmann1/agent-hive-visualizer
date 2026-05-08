@@ -16,6 +16,7 @@ export default function AgentRoster() {
   const dialogNpcId = useGameStore((s) => s.dialog.npcId);
   const activities = useAgentStore((s) => s.activities);
   const usageByAgent = useAgentStore((s) => s.usageByAgent);
+  const errorByAgent = useAgentStore((s) => s.errorByAgent);
   const staticNpcs = useNpcStore((s) => s.staticNpcs);
   const dynamic = useNpcStore((s) => s.dynamic);
 
@@ -52,7 +53,7 @@ export default function AgentRoster() {
             NO AGENTS YET
           </p>
           <p className="text-[12px] leading-relaxed opacity-75 mb-3">
-            Start a Claude session from inside AgentQuest — or press{" "}
+            Start a Claude session from inside Agent Force HQ — or press{" "}
             <span className="pixel-font text-[9px] px-1 bg-paper-dim border border-ink rounded">
               ⌘N
             </span>{" "}
@@ -73,7 +74,7 @@ export default function AgentRoster() {
                 }),
               );
             }}
-            className="pixel-font text-[10px] px-3 py-2 rounded border-2 border-ink bg-accent text-ink hover:bg-accent-dark tracking-wide mb-3"
+            className="pixel-font text-[10px] px-3 py-2 rounded border-2 border-ink bg-accent text-paper-dim hover:bg-accent-dark hover:text-paper-dim tracking-wide mb-3"
           >
             + NEW AGENT
           </button>
@@ -88,6 +89,7 @@ export default function AgentRoster() {
               renderRow(n, false, {
                 activities,
                 usageByAgent,
+                errorByAgent,
                 dialogNpcId,
                 hasChildren: dynamicChildrenByParent.has(n.id),
                 children: dynamicChildrenByParent.get(n.id),
@@ -107,6 +109,7 @@ interface RenderRowOpts {
     string,
     { input: number; output: number; cacheRead: number }
   >;
+  errorByAgent: Record<string, { message: string; at: number }>;
   dialogNpcId: string | null;
   hasChildren?: boolean;
   children?: DynamicNpc[];
@@ -118,7 +121,7 @@ function renderRow(
   isChild: boolean,
   opts: RenderRowOpts,
 ) {
-  const { activities, usageByAgent, dialogNpcId, hasChildren, children } = opts;
+  const { activities, usageByAgent, errorByAgent, dialogNpcId, hasChildren, children } = opts;
   const act = activities[n.id];
   const usage = usageByAgent[n.id];
   const isActive = dialogNpcId === n.id;
@@ -153,7 +156,7 @@ function renderRow(
             useToastStore
               .getState()
               .show(
-                `This agent runs outside AgentQuest (PID ${dyn.pid}) — switch via ⌘⇥.`,
+                `This agent runs outside Agent Force HQ (PID ${dyn.pid}) — switch via ⌘⇥.`,
                 "warn",
               );
           }
@@ -180,11 +183,7 @@ function renderRow(
       }}
     >
       <div className="shrink-0">
-        <NpcAvatar
-          baseTile={n.baseTile}
-          tint={n.tint}
-          size={avatarSize}
-        />
+        <NpcAvatar id={n.id} size={avatarSize} />
       </div>
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2 mb-1">
@@ -203,9 +202,9 @@ function renderRow(
             <span
               className="pixel-font text-[8px] px-1.5 py-0.5 rounded"
               style={{ background: "#2a3150", color: "#8e94bf" }}
-              title="Detected external session (not launched from AgentQuest)"
+              title="Detected external session (not launched from Agent Force HQ)"
             >
-              EXT
+              EXTERNAL
             </span>
           ) : (
             isDynamic && (
@@ -223,7 +222,16 @@ function renderRow(
               style={{ background: "#1b1e2b", color: "#f4ecd8" }}
               title="This agent has spawned sub-agents"
             >
-              +HELPER
+              HELPER
+            </span>
+          )}
+          {errorByAgent[n.id] && (
+            <span
+              className="pixel-font text-[8px] px-1.5 py-0.5 rounded"
+              style={{ background: "#ef4444", color: "#fff" }}
+              title={errorByAgent[n.id].message}
+            >
+              ERROR
             </span>
           )}
         </div>

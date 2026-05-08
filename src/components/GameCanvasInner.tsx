@@ -6,21 +6,16 @@ import { worldSceneConfig, WorldScene } from "../game/WorldScene";
 import { TILE_SIZE } from "../game/palette";
 import { useContextMenuStore } from "../stores/useContextMenuStore";
 
-// Target CSS zoom for pixel tiles. In v2.0 the in-game zoom is driven by
-// Phaser's camera (wheel to zoom), so CSS zoom only needs to be "enough
-// to make pixel art look crisp" — NOT the semantic zoom level. Keep this
-// low so the free-pan camera has plenty of room to roam.
-const TARGET_ZOOM = 1.5;
-
 export default function GameCanvasInner() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const gameRef = useRef<Phaser.Game | null>(null);
 
-  // Resize Phaser to exactly fill the panel. No letterbox: we pick a
-  // viewport whose pixel dimensions equal `panelPx / TARGET_ZOOM` (rounded
-  // to whole tiles), then ask Phaser to resize the renderer + camera to
-  // that native size. CSS scales the resulting canvas by TARGET_ZOOM so
-  // pixels stay crisp.
+  // Resize Phaser to exactly fill the panel at DEVICE-PIXEL resolution
+  // so one canvas pixel == one screen pixel. Without this, on a Retina
+  // (DPR=2) display the browser composites the canvas onto a 2× backing
+  // store and the resulting fractional texel→device-pixel ratio softens
+  // the pixel art. With it, `pixelArt: true` + integer in-game camera
+  // zoom keeps the whole pipeline crisp.
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -32,15 +27,15 @@ export default function GameCanvasInner() {
     let currentH = 0;
 
     const applySize = (cssW: number, cssH: number) => {
-      // Native (pre-zoom) dimensions — do NOT snap to whole tiles; the camera
-      // can render partial tiles at the edges, and snapping leaves a visible
-      // dark gap at the bottom where the panel is taller than the snapped size.
-      const nativeW = Math.max(TILE_SIZE, Math.floor(cssW / TARGET_ZOOM));
-      const nativeH = Math.max(TILE_SIZE, Math.floor(cssH / TARGET_ZOOM));
+      const dpr = window.devicePixelRatio || 1;
       // CSS size — round UP to guarantee the canvas covers the whole panel
       // (a 1px overhang is harmless; a 1px gap is ugly).
       const finalCssW = Math.ceil(cssW);
       const finalCssH = Math.ceil(cssH);
+      // Internal buffer is in DEVICE pixels so the browser compositor
+      // does a 1:1 paint (no bilinear).
+      const nativeW = Math.max(TILE_SIZE, Math.round(finalCssW * dpr));
+      const nativeH = Math.max(TILE_SIZE, Math.round(finalCssH * dpr));
 
       if (currentW === nativeW && currentH === nativeH) return;
       currentW = nativeW;

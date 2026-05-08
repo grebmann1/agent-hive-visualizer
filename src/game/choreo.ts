@@ -18,7 +18,8 @@ export type ChoreoKind =
   | "browsing"
   | "pondering"
   | "planning"
-  | "directing";
+  | "directing"
+  | "sit-down";
 
 /**
  * Map a Claude tool name (from transcript `tool_use.name`) to a choreo kind.
@@ -318,6 +319,47 @@ export function startChoreo(
           yoyo: true,
           repeat: -1,
           ease: "Sine.easeInOut",
+        }),
+      );
+      break;
+    }
+
+    case "sit-down": {
+      // Brief settle: agent drops a couple of pixels and squashes
+      // vertically so it reads as "sat down at the desk". Then a tiny
+      // breathing yoyo to show they're alive but resting.
+      // NOTE: do NOT call setFrame here — the caller has already
+      // swapped the sprite's texture to the dedicated sit sheet, and
+      // setFrame(0) would walk on top of that with the run sheet's
+      // standing pose.
+      tweens.push(
+        scene.tweens.add({
+          targets: sprite,
+          y: { from: sprite.y, to: sprite.y + 2 },
+          duration: 200,
+          ease: "Sine.easeOut",
+        }),
+      );
+      tweens.push(
+        scene.tweens.add({
+          targets: sprite,
+          scaleY: { from: ry(1), to: ry(0.93) },
+          duration: 200,
+          ease: "Sine.easeOut",
+          onComplete: () => {
+            // After the settle, gentle breathing yoyo on top of the
+            // squashed scale so the seated pose is preserved.
+            tweens.push(
+              scene.tweens.add({
+                targets: sprite,
+                scaleY: { from: ry(0.93), to: ry(0.9) },
+                duration: 1400,
+                yoyo: true,
+                repeat: -1,
+                ease: "Sine.easeInOut",
+              }),
+            );
+          },
         }),
       );
       break;

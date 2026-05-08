@@ -33,14 +33,13 @@ export interface ZoneDef {
 
 // Hard fallback anchors for any RoomId the authored map doesn't define.
 // In practice the .tmj should name rooms (Training, DataCenter, DevOps,
-// Security, WarRoom, "Meeting Room", Lounge) and the loader fills in
-// real cells. These constants only matter if you remove a room from
-// Tiled — keeps the routing from crashing.
+// Security, WarRoom, "Meeting Room") and the loader fills in real cells.
+// These constants only matter if you remove a room from Tiled — keeps
+// the routing from crashing.
 const FALLBACK_ANCHORS: Partial<Record<RoomId, { col: number; row: number }>> = {
   library: { col: 13, row: 2 },
   coding_room: { col: 27, row: 3 },
   desk: { col: 20, row: 3 },
-  cinema: { col: 33, row: 15 },
   tool_workshop: { col: 42, row: 3 },
   meeting_room: { col: 33, row: 10 },
   testing_lab: { col: 34, row: 3 },

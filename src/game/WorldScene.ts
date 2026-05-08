@@ -12,18 +12,15 @@ import { useWorldBus } from "../stores/useWorldBus";
 import { GB, TILE_SIZE } from "./palette";
 import { type NpcDef } from "./npcs";
 import { bfs } from "./pathfind";
-import {
-  buildCharacterSheetFromTile,
-  DEFAULT_CHARACTER_TILE,
-} from "./pixelArt";
-import { ROOM_ANCHORS } from "./rooms";
+import { ROOM_ANCHORS, getRoomRegions } from "./rooms";
+import { roomById } from "./room-registry";
 import {
   EXTERIOR_ANCHORS,
   isWalkableIn,
   loadInteriorZone,
   type ZoneDef,
 } from "./zones";
-import { resolveGid } from "./tiled-loader";
+import { resolveGid, type SeatCell } from "./tiled-loader";
 import {
   type ChoreoHandle,
   type ChoreoKind,
@@ -43,21 +40,71 @@ const NATIVE_W = VIEWPORT_COLS * TILE_SIZE;
 const NATIVE_H = VIEWPORT_ROWS * TILE_SIZE;
 
 const TILESET_KEY = "gb_tileset";
+
+// Modern (Limezu) character spritesheets. Each PNG is 384×32 = 24 frames
+// (16×16 per frame), organized as 6 frames per direction in the order
+// down → up → left → right. We load all four characters once at preload
+// time, then ensureNpcTexture picks one per agent by id-hash so each
+// claude session gets a stable, distinct sprite.
+const MODERN_CHARS = ["Adam", "Alex", "Amelia", "Bob"] as const;
+type ModernChar = (typeof MODERN_CHARS)[number];
+const MODERN_KEY = (c: ModernChar) => `modern_${c.toLowerCase()}`;
+// Idle / sit are separate spritesheets; their frame counts and layouts
+// match `*_run_16x16.png` (24 frames × 16w × 32h). We give each its own
+// Phaser texture key so animations can pull frames from the right sheet.
+const MODERN_IDLE_KEY = (c: ModernChar) => `modern_${c.toLowerCase()}_idle`;
+const MODERN_SIT_KEY = (c: ModernChar) => `modern_${c.toLowerCase()}_sit`;
 const NPC_KEY = (id: string) => `gb_npc_${id}`;
+
+// Recolor palette — applied as a sprite tint so two agents on the same
+// base character still read as different people. Picked to stay legible
+// against the dark indigo floor without crushing the line art.
+const AGENT_TINTS = [
+  0xffffff, // no tint (preserves the authored colors)
+  0xffd1a4, // warm sand
+  0xa9d6ff, // sky
+  0xffb1d2, // pink
+  0xc9e7a4, // lime
+  0xd4b4ff, // lavender
+  0xffe17a, // amber
+  0xa3e3d6, // mint
+] as const;
 
 const STEP_DURATION_MS = 160;
 
-// Frame indices (matches pixelArt CHAR_FRAME order)
+// Frame indices into the Limezu 24-frame run sheet (6 per direction).
+// We use 2 frames per direction for the walk anim — the first and middle
+// frame of the run cycle, which gives a clean step bob without looking
+// frantic at our 7 fps animation rate.
 const FRAME = {
-  down: [0, 1],
-  up: [2, 3],
-  left: [4, 5],
-  right: [6, 7],
+  down: [0, 3],
+  up: [6, 9],
+  left: [12, 15],
+  right: [18, 21],
+} as const;
+
+// Idle-animation frame ranges. Each direction has 6 idle frames in the
+// `*_idle_anim_16x16.png` sheet (same 24-frame layout as run). We use a
+// 4-frame loop per direction (skipping a couple to keep the cycle calm).
+const IDLE_FRAME = {
+  down: [0, 1, 2, 3],
+  up: [6, 7, 8, 9],
+  left: [12, 13, 14, 15],
+  right: [18, 19, 20, 21],
+} as const;
+
+// First frame per direction in the sit sheet — used as a static pose
+// when an idle agent claims a seat.
+const SIT_FRAME = {
+  down: 0,
+  up: 6,
+  left: 12,
+  right: 18,
 } as const;
 
 // Camera control constants (v2.0 free-pan mode).
 const DRAG_THRESHOLD_PX = 4;
-const ZOOM_MIN = 0.5;
+const ZOOM_MIN = 1;
 const ZOOM_MAX = 3;
 
 /** Label shown on the always-on overhead pill. Prefers the basename
@@ -98,6 +145,11 @@ interface Entity {
   row: number;
   facing: Direction;
   animKey: string; // prefix used for this entity's anims
+  // Texture key for this NPC's idle-loop sheet. Played as the resting
+  // animation when the agent is not walking, choreoing, or sitting.
+  idleAnimKey: string;
+  // Texture key for the seated pose sheet (frame indexed by SIT_FRAME).
+  sitSheetKey: string;
   // Baseline sprite scale between choreos. 1 for normal NPCs, 0.8 for
   // sub-agents so they read as smaller/subordinate even at rest. Choreo
   // startChoreoFor/stop must respect this to avoid snapping back to 1.
@@ -106,6 +158,32 @@ interface Entity {
   choreo?: { kind: ChoreoKind; handle: ChoreoHandle; startedAt: number };
   // Helper sprite spawned while the agent is running a `Task` (sub-agent).
   helper?: HelperSprite;
+  // Floating "HELPER" badge above sub-agent sprites (parented NPCs only).
+  helperBadge?: Phaser.GameObjects.Text;
+  // Floating thinking excerpt — appears below the pill while
+  // `thinkingByAgent[id]` has fresh content. Long text scrolls
+  // marquee-style inside a fixed-width clipped container so the user
+  // sees the full message over time. Auto-fades after TTL of no
+  // updates so a stale "thinking..." line doesn't sit there forever.
+  thinkingBadge?: {
+    container: Phaser.GameObjects.Container;
+    bg: Phaser.GameObjects.Graphics;
+    text: Phaser.GameObjects.Text;
+    maskGfx: Phaser.GameObjects.Graphics;
+    pixelWidth: number;
+    boxWidth: number;
+    boxHeight: number;
+  };
+  thinkingText?: string;
+  thinkingUpdatedAt?: number;
+  // Where this NPC is currently walking. Set by walkNpcToRoom and
+  // cleared once the path drains; read by the transit indicator badge.
+  transitTarget?: RoomId;
+  transitBadge?: Phaser.GameObjects.Text;
+  transitText?: string;
+  // Hover state: when true the pill renders the name + emoji + bg;
+  // when false only the emoji shows so the world looks less busy.
+  pillHover?: boolean;
 }
 
 interface HelperSprite {
@@ -149,6 +227,27 @@ export class WorldScene extends Phaser.Scene {
   // True once the user has panned/zoomed. Used to decide whether panel
   // resizes should re-center the map (only before they've interacted).
   private hasUserMovedCamera = false;
+  // Map size in world pixels; cached at create() so the wheel-zoom
+  // handler can compute the cover-fit floor without re-reading zone.
+  private mapPixelW = 0;
+  private mapPixelH = 0;
+
+  // Debug overlay — red rects around every Tiled object + green dots at
+  // each NPC's tile-anchor cell. Toggle with the `D` key. Persisted on
+  // window so a refreshed scene picks up the previous setting.
+  private debugGfx?: Phaser.GameObjects.Graphics;
+  private debugVisible = false;
+  // Cache of objects from the .tmj — used by the debug overlay so we
+  // don't have to re-fetch the parsed map each frame.
+  private debugObjects: Array<{
+    name: string;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    collidable: boolean;
+    seat: boolean;
+  }> = [];
 
   // Graphics object used to draw tether lines between parent NPCs and their
   // sub-agent children. Redrawn every frame inside `update()`.
@@ -165,7 +264,11 @@ export class WorldScene extends Phaser.Scene {
   // Claimed cinema seats: npcId -> seat key. A seat key is "col,row".
   private occupiedSeats = new Map<string, string>();
   // Inverse lookup so we can release a seat without scanning.
-  private seatByNpc = new Map<string, { col: number; row: number }>();
+  private seatByNpc = new Map<string, SeatCell>();
+  // Pixel-precise final position for an in-progress walkNpcToCell.
+  // Used to land sprites on the seat's authored center instead of
+  // the tile center on the LAST step of the path. Cleared on arrival.
+  private npcSeatOffset = new Map<string, { px: number; py: number }>();
   // Counter-state for each summon tick so we only act on increments.
   private lastSeenSummonTicks: Record<string, number> = {};
 
@@ -174,47 +277,95 @@ export class WorldScene extends Phaser.Scene {
   }
 
   preload() {
-    // Kenney Tiny Dungeon tilesheet — source for procedural character
-    // sprites. Frame size is 16x16 (Kenney native), independent of the
-    // world TILE_SIZE; we scale NPC sprites at render time.
-    this.load.spritesheet(TILESET_KEY, "/assets/tilesets/tiny-dungeon.png", {
-      frameWidth: 16,
-      frameHeight: 16,
-    });
+    // Limezu "Modern Office Revamped" character sheets (CC0). Four
+    // distinct characters (Adam, Alex, Amelia, Bob); we hash agent id
+    // → character so each session looks consistent and multiple
+    // agents look different. Each sheet is 384×32 = 24 frames of 16×16
+    // (run cycle, 6 per direction). The walk anim uses two of those.
+    for (const c of MODERN_CHARS) {
+      // Run sheet — used for walk anims while the NPC is mid-path.
+      this.load.spritesheet(
+        MODERN_KEY(c),
+        `/assets/sprites/modern/${c}_run_16x16.png`,
+        // Sheet is 384×32 = 24 frames at 16w × 32h. The character is
+        // two tiles tall (head + body) — using frameHeight 16 would
+        // crop to just the head.
+        { frameWidth: 16, frameHeight: 32 },
+      );
+      // Idle-anim sheet — used as the resting loop so agents look alive
+      // even when standing still (not seated).
+      this.load.spritesheet(
+        MODERN_IDLE_KEY(c),
+        `/assets/sprites/modern/${c}_idle_anim_16x16.png`,
+        { frameWidth: 16, frameHeight: 32 },
+      );
+      // Sit sheet — `*_sit3_16x16.png` is the front-facing seated
+      // variant (eyes toward the camera) so a player can see who's at
+      // the desk. The other sit*_16x16 sheets show the character from
+      // behind / from the side and read as "agent has turned away".
+      this.load.spritesheet(
+        MODERN_SIT_KEY(c),
+        `/assets/sprites/modern/${c}_sit3_16x16.png`,
+        { frameWidth: 16, frameHeight: 32 },
+      );
+    }
   }
 
-  /**
-   * Build (or reuse) a per-entity character spritesheet by synthesizing an
-   * 8-frame walk sheet from a single character tile in the Tiny Dungeon
-   * tilemap, then palette-swapping the shirt colors with the entity's tint.
-   * Must run after the tileset image has finished loading (inside create()).
-   */
-  private ensureCharacterTexture(
-    key: string,
-    baseTile: number,
-    tint: { l?: string; L?: string; d?: string },
-  ) {
-    if (this.textures.exists(key)) return;
-    const tilemap = this.textures
-      .get(TILESET_KEY)
-      .getSourceImage() as HTMLImageElement;
-    const canvas = buildCharacterSheetFromTile(tilemap, baseTile, tint);
-    // Character sheet is 8 frames × 16x16 native pixels (Kenney). The
-    // world's TILE_SIZE is 32 — sprites are scaled up at render time
-    // to match the new tile cadence.
-    this.textures.addSpriteSheet(
-      key,
-      canvas as unknown as HTMLImageElement,
-      { frameWidth: 16, frameHeight: 16 },
-    );
+  /** Pick a Modern character for this NPC by id hash so the same agent
+   *  always renders as the same person, but two simultaneous agents
+   *  almost always look different. */
+  private characterForNpc(id: string): ModernChar {
+    let h = 0;
+    for (let i = 0; i < id.length; i++) {
+      h = ((h << 5) - h + id.charCodeAt(i)) | 0;
+    }
+    return MODERN_CHARS[Math.abs(h) % MODERN_CHARS.length];
+  }
+
+  /** Returns the Phaser texture key the NPC should sample frames from.
+   *  All four Modern sheets are preloaded once; per-NPC textures are no
+   *  longer synthesized. The animKey for this NPC is keyed off the
+   *  shared sheet so multiple agents that share a character still get
+   *  smooth playback (Phaser anims are global by key). */
+  private sheetKeyForNpc(id: string): string {
+    return MODERN_KEY(this.characterForNpc(id));
+  }
+
+  private idleKeyForNpc(id: string): string {
+    return MODERN_IDLE_KEY(this.characterForNpc(id));
+  }
+
+  private sitKeyForNpc(id: string): string {
+    return MODERN_SIT_KEY(this.characterForNpc(id));
+  }
+
+  /** Play the per-character idle loop in the NPC's current facing.
+   *  Used at the end of a walk path and after the spawn pop so the
+   *  agent reads as alive rather than statue-still. Active choreos
+   *  (typing/reading/etc) overwrite the frame manually each tick, so
+   *  this never fights tool poses. */
+  private playIdleAnim(npc: Entity) {
+    if (!npc.sprite || !npc.sprite.scene) return;
+    const animKey = `${npc.idleAnimKey}-idle-${npc.facing}`;
+    if (!this.anims.exists(animKey)) return;
+    npc.sprite.play(animKey, true);
+  }
+
+  /** Per-agent tint — deterministic from id so the same agent keeps
+   *  the same look across reconnects. Combined with the 4 base
+   *  characters this gives ~32 distinguishable silhouettes. */
+  private tintForNpc(id: string): number {
+    let h = 0;
+    for (let i = 0; i < id.length; i++) {
+      h = ((h * 31 + id.charCodeAt(i)) | 0);
+    }
+    return AGENT_TINTS[Math.abs(h) % AGENT_TINTS.length];
   }
 
   private ensureNpcTexture(npc: NpcDef) {
-    this.ensureCharacterTexture(
-      NPC_KEY(npc.id),
-      npc.baseTile ?? DEFAULT_CHARACTER_TILE,
-      npc.tint,
-    );
+    // No-op: textures are loaded in preload(). Kept as a hook in case
+    // a future design re-introduces per-agent texture synthesis.
+    void npc;
   }
 
   async create() {
@@ -236,6 +387,18 @@ export class WorldScene extends Phaser.Scene {
     // Cache the authored seat cells so claimFreeSeat / cinemaTick / the
     // post-spawn flow can look them up without re-reading the manifest.
     this.seatCells = bundle.parsed.seatCells.slice();
+    // Snapshot the raw Tiled objects so the debug overlay can outline
+    // every authored rect (rooms, seats, decor, collision) without
+    // re-fetching the .tmj.
+    this.debugObjects = bundle.parsed.objects.map((o) => ({
+      name: o.name,
+      x: o.x,
+      y: o.y,
+      width: o.width,
+      height: o.height,
+      collidable: o.collidable,
+      seat: o.seat,
+    }));
     if (this.seatCells.length === 0 && typeof window !== "undefined") {
       console.warn(
         `[world] no seat objects in the .tmj — agents won't claim a desk after spawn.`,
@@ -265,6 +428,8 @@ export class WorldScene extends Phaser.Scene {
     // works inside these bounds.
     const mapW = this.zone.cols * TILE_SIZE;
     const mapH = this.zone.rows * TILE_SIZE;
+    this.mapPixelW = mapW;
+    this.mapPixelH = mapH;
     this.cameras.main.setBounds(0, 0, mapW, mapH);
 
     for (const npc of useNpcStore.getState().staticNpcs) {
@@ -282,6 +447,16 @@ export class WorldScene extends Phaser.Scene {
     // Tether rendering layer — sits under sprites so it doesn't obscure them.
     this.tetherGfx = this.add.graphics().setDepth(950);
 
+    // Debug overlay — drawn ABOVE everything so the inspector outlines
+    // are unmistakable. Hidden by default; toggled by the `D` key.
+    this.debugGfx = this.add.graphics().setDepth(2000).setVisible(false);
+    this.input.keyboard?.on("keydown-D", (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (t?.tagName === "INPUT" || t?.tagName === "TEXTAREA") return;
+      this.debugVisible = !this.debugVisible;
+      this.debugGfx?.setVisible(this.debugVisible);
+    });
+
     // Center + fit the map to the current viewport. We use the LARGER
     // of width-fit / height-fit ratios so the map COVERS the canvas
     // (no chrome bleed-through) — accepts a small crop on whichever
@@ -289,9 +464,22 @@ export class WorldScene extends Phaser.Scene {
     // auto-fitting and respects their viewing choice.
     const cam = this.cameras.main;
     const fitZoom = () => {
+      // Always re-sync the camera viewport to the renderer size — with
+      // `scale.mode: NONE` the camera doesn't auto-resize when the
+      // canvas does, so without this the visible play area stays
+      // pinned to the original 704×384 default and the rest of the
+      // panel renders as empty chrome.
+      cam.setSize(this.scale.width, this.scale.height);
       if (this.hasUserMovedCamera) return;
+      // Snap to the next integer ≥ the cover-fit ratio. Integer zoom
+      // keeps pixel art crisp; CEIL guarantees the map COVERS the
+      // viewport (no chrome bands). We floor at 2 so that even when
+      // the panel is small enough that zoom=1 would technically fit,
+      // the world (and agents) still render at a visible size — at
+      // zoom=1 on Retina, a 16-px sprite is only 8 CSS px tall.
       const fit = Math.max(cam.width / mapW, cam.height / mapH);
-      cam.setZoom(fit);
+      const zoom = Math.max(2, Math.ceil(fit));
+      cam.setZoom(zoom);
       cam.centerOn(mapW / 2, mapH / 2);
     };
     fitZoom();
@@ -315,6 +503,7 @@ export class WorldScene extends Phaser.Scene {
       this.npcs.clear();
       this.occupiedSeats.clear();
       this.seatByNpc.clear();
+      this.npcSeatOffset.clear();
       this.lastActivityAt.clear();
     });
   }
@@ -329,7 +518,7 @@ export class WorldScene extends Phaser.Scene {
   // with `seat: true` in the .tmj). Set in create() once the map loads;
   // empty until then so claimFreeSeat is a no-op pre-load. The 60s-idle
   // cinema loop and the post-spawn assignment both walk this list.
-  private seatCells: Array<{ col: number; row: number }> = [];
+  private seatCells: SeatCell[] = [];
 
   private startCinemaLoop() {
     if (this.zone.id !== "interior") return;
@@ -362,7 +551,10 @@ export class WorldScene extends Phaser.Scene {
       const seat = this.claimFreeSeat(npc.def.id);
       if (!seat) continue;
 
-      this.walkNpcToCell(npc.def.id, seat.col, seat.row);
+      this.walkNpcToCell(npc.def.id, seat.col, seat.row, {
+        px: seat.px,
+        py: seat.py,
+      });
       // Record an activity timestamp at the cinema-departure moment so the
       // loop doesn't immediately re-fire for the next NPC on the same tick
       // that happens to land on the same quiet threshold.
@@ -372,9 +564,7 @@ export class WorldScene extends Phaser.Scene {
     }
   }
 
-  private claimFreeSeat(
-    npcId: string,
-  ): { col: number; row: number } | null {
+  private claimFreeSeat(npcId: string): SeatCell | null {
     for (const seat of this.seatCells) {
       const key = `${seat.col},${seat.row}`;
       if (this.occupiedSeats.has(key)) continue;
@@ -390,6 +580,16 @@ export class WorldScene extends Phaser.Scene {
     if (!seat) return;
     this.seatByNpc.delete(npcId);
     this.occupiedSeats.delete(`${seat.col},${seat.row}`);
+    // Restore the standing texture so the next walk anim plays from
+    // the run sheet rather than the seated one.
+    const npc = this.npcs.get(npcId);
+    if (npc?.sprite?.scene && npc.sprite.texture.key !== npc.animKey) {
+      try {
+        npc.sprite.setTexture(npc.animKey, FRAME[npc.facing][0]);
+      } catch {
+        // ignore
+      }
+    }
   }
 
   /**
@@ -454,8 +654,17 @@ export class WorldScene extends Phaser.Scene {
   /**
    * Like walkNpcToRoom but targets an arbitrary cell. Used by the cinema
    * loop (targets seats) and by summonNpc (targets tiles near the player).
+   *
+   * If `finalOffset` is supplied, the LAST step of the path lands on
+   * the offset's pixel center instead of the tile center — used so
+   * sprites rest on the actual chair art rather than near it.
    */
-  private walkNpcToCell(npcId: string, targetCol: number, targetRow: number) {
+  private walkNpcToCell(
+    npcId: string,
+    targetCol: number,
+    targetRow: number,
+    finalOffset?: { px: number; py: number },
+  ) {
     const npc = this.npcs.get(npcId);
     if (!npc) return;
 
@@ -465,8 +674,28 @@ export class WorldScene extends Phaser.Scene {
       blocked.push({ col: other.col, row: other.row });
     }
     const path = bfs(npc.col, npc.row, targetCol, targetRow, { blocked });
-    if (path.length <= 1) return;
+    if (path.length <= 1) {
+      // Already there. Apply offset directly so a re-claim of the same
+      // tile still snaps the sprite onto the chair.
+      if (finalOffset) {
+        npc.sprite.setPosition(finalOffset.px, finalOffset.py);
+        npc.shadow.setPosition(finalOffset.px, finalOffset.py + 7);
+        npc.facing = "down";
+        try {
+          npc.sprite.stop();
+          npc.sprite.setFrame(FRAME.down[0]);
+        } catch {
+          // ignore
+        }
+      }
+      return;
+    }
     this.npcPaths.set(npcId, path.slice(1));
+    if (finalOffset) {
+      this.npcSeatOffset.set(npcId, finalOffset);
+    } else {
+      this.npcSeatOffset.delete(npcId);
+    }
   }
 
   // --------------------------------------------------------------------
@@ -501,18 +730,21 @@ export class WorldScene extends Phaser.Scene {
   }
 
   // --------------------------------------------------------------------
-  // animation setup — per-entity anim keys so they don't fight
+  // animation setup — anim keys are scoped to the SHARED sheet, not the
+  // individual NPC, so multiple agents on the same character reuse the
+  // same global Phaser animation.
   // --------------------------------------------------------------------
   private createAnims() {
-    for (const npc of useNpcStore.getState().staticNpcs) {
-      this.ensureAnimsFor(npc.id, NPC_KEY(npc.id));
+    for (const c of MODERN_CHARS) {
+      this.ensureAnimsForSheet(MODERN_KEY(c));
+      this.ensureIdleAnimsForSheet(MODERN_IDLE_KEY(c));
     }
   }
 
-  private ensureAnimsFor(prefix: string, sheetKey: string) {
+  private ensureAnimsForSheet(sheetKey: string) {
     for (const dir of ["down", "up", "left", "right"] as Direction[]) {
       const frames = FRAME[dir];
-      const animKey = `${prefix}-walk-${dir}`;
+      const animKey = `${sheetKey}-walk-${dir}`;
       if (this.anims.exists(animKey)) continue;
       this.anims.create({
         key: animKey,
@@ -521,6 +753,22 @@ export class WorldScene extends Phaser.Scene {
           { key: sheetKey, frame: frames[1] },
         ],
         frameRate: 7,
+        repeat: -1,
+      });
+    }
+  }
+
+  /** Idle-loop animations — one per direction. Slow frame rate so the
+   *  bob/blink reads as resting rather than fidgeting. */
+  private ensureIdleAnimsForSheet(idleKey: string) {
+    for (const dir of ["down", "up", "left", "right"] as Direction[]) {
+      const frames = IDLE_FRAME[dir];
+      const animKey = `${idleKey}-idle-${dir}`;
+      if (this.anims.exists(animKey)) continue;
+      this.anims.create({
+        key: animKey,
+        frames: frames.map((f) => ({ key: idleKey, frame: f })),
+        frameRate: 4,
         repeat: -1,
       });
     }
@@ -542,7 +790,6 @@ export class WorldScene extends Phaser.Scene {
   addNpcEntity(def: NpcDef) {
     if (this.npcs.has(def.id)) return;
     this.ensureNpcTexture(def);
-    this.ensureAnimsFor(def.id, NPC_KEY(def.id));
 
     // Spawn position. CP6: dynamic (non-static, non-sub-agent) NPCs enter
     // the scene from the exterior path — SessionStart feels like an
@@ -610,14 +857,56 @@ export class WorldScene extends Phaser.Scene {
     const shadow = this.add
       .rectangle(px, py + 7, 10, 3, 0x0f380f, 0.35)
       .setDepth(900);
+    const sheetKey = this.sheetKeyForNpc(def.id);
+    const idleAnimKey = this.idleKeyForNpc(def.id);
+    const sitSheetKey = this.sitKeyForNpc(def.id);
+    this.ensureAnimsForSheet(sheetKey);
+    this.ensureIdleAnimsForSheet(idleAnimKey);
     const sprite = this.add
-      .sprite(px, py, NPC_KEY(def.id), 0)
+      .sprite(px, py, sheetKey, FRAME.down[0])
       .setDepth(1000 + row);
+    // Per-agent tint so two NPCs sharing a base character still look
+    // distinct. White (0xffffff) is a no-op tint and preserves the
+    // authored colors.
+    const tint = this.tintForNpc(def.id);
+    if (tint !== 0xffffff) sprite.setTint(tint);
+    sprite.setInteractive({ useHandCursor: true, pixelPerfect: false });
+    sprite.on("pointerover", () => {
+      if (useGameStore.getState().dialog.active) return;
+      const ent = this.npcs.get(def.id);
+      if (ent) {
+        ent.pillHover = true;
+        this.renderPill(def.id);
+      }
+      this.tweens.add({
+        targets: sprite,
+        scaleX: sprite.scaleX * 1.08,
+        scaleY: sprite.scaleY * 1.08,
+        duration: 120,
+        ease: "Quad.easeOut",
+      });
+    });
+    sprite.on("pointerout", () => {
+      // Look up the resting scale for this NPC and tween back to it.
+      const ent = this.npcs.get(def.id);
+      const target = ent?.restingScale ?? 1;
+      if (ent) {
+        ent.pillHover = false;
+        this.renderPill(def.id);
+      }
+      this.tweens.add({
+        targets: sprite,
+        scaleX: target,
+        scaleY: target,
+        duration: 120,
+        ease: "Quad.easeOut",
+      });
+    });
 
     const indicator = this.add
       .text(px, py - 14, "!", {
         fontFamily: '"Press Start 2P", monospace',
-        fontSize: "8px",
+        fontSize: "11px",
         color: "#0f380f",
         resolution: 2,
       })
@@ -632,7 +921,7 @@ export class WorldScene extends Phaser.Scene {
     const overheadCodeText = this.add
       .text(0, 0, pillLabelFor(def as { id: string; name?: string; cwd?: string }), {
         fontFamily: '"Press Start 2P", monospace',
-        fontSize: "7px",
+        fontSize: "10px",
         color: "#1b1e2b",
         resolution: 3,
       })
@@ -641,13 +930,13 @@ export class WorldScene extends Phaser.Scene {
       .text(0, 0, IDLE_EMOJI, {
         fontFamily:
           '"Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif',
-        fontSize: "10px",
+        fontSize: "14px",
         color: "#1b1e2b",
         resolution: 3,
       })
       .setOrigin(0, 0.5);
     const overheadContainer = this.add
-      .container(px, py - 18, [overheadBg, overheadCodeText, overheadEmojiText])
+      .container(px, py - 22, [overheadBg, overheadCodeText, overheadEmojiText])
       .setDepth(1600 + row)
       .setAlpha(1);
 
@@ -657,10 +946,28 @@ export class WorldScene extends Phaser.Scene {
     const isSubAgent = Boolean(
       (def as { parentId?: string }).parentId,
     );
-    // World tiles are 32px; Kenney character sprites are 16px native.
-    // Default scale is 2 so a sprite occupies a full tile. Sub-agents
-    // shrink to 1.6 (was 0.8 in 16px-tile world) to read as smaller.
-    const restingScale = isSubAgent ? 1.6 : 2;
+    // World tiles are 32px. Limezu Modern sprites are 16w × 32h native
+    // — already as tall as a tile. Scale 1 keeps the figure fitting in
+    // a single cell vertically; sub-agents render at 0.85 to read as
+    // visibly smaller.
+    const restingScale = isSubAgent ? 0.85 : 1;
+
+    // Floating "HELPER" badge above sub-agents. Reads like a chip on
+    // the parent's tether, so the relationship is obvious without the
+    // user having to spot the dotted line.
+    let helperBadge: Phaser.GameObjects.Text | undefined;
+    if (isSubAgent) {
+      helperBadge = this.add
+        .text(px, py - TILE_SIZE - 10, "HELPER", {
+          fontFamily: '"Press Start 2P", monospace',
+          fontSize: "7px",
+          color: "#22c55e",
+          resolution: 3,
+        })
+        .setOrigin(0.5, 1)
+        .setDepth(1599 + row)
+        .setAlpha(0.9);
+    }
 
     this.npcs.set(def.id, {
       def,
@@ -675,8 +982,11 @@ export class WorldScene extends Phaser.Scene {
       col,
       row,
       facing: "down",
-      animKey: def.id,
+      animKey: sheetKey,
+      idleAnimKey,
+      sitSheetKey,
       restingScale,
+      helperBadge,
     });
 
     // Paint the initial pill (resting state, idle emoji). We do this once
@@ -699,6 +1009,7 @@ export class WorldScene extends Phaser.Scene {
         if (!entity) return;
         entity.sprite.setScale(restingScale);
         this.startChoreoFor(entity, "idle-bob");
+        this.playIdleAnim(entity);
       },
     });
 
@@ -734,7 +1045,10 @@ export class WorldScene extends Phaser.Scene {
       // agents and static NPCs fall through to the default home cell.
       const seat = this.claimFreeSeat(def.id);
       if (seat) {
-        this.walkNpcToCell(def.id, seat.col, seat.row);
+        this.walkNpcToCell(def.id, seat.col, seat.row, {
+          px: seat.px,
+          py: seat.py,
+        });
       } else if (typeof window !== "undefined") {
         console.warn(
           `[world] no free seat for ${def.id} — ${this.occupiedSeats.size}/${this.seatCells.length} seats taken. Falling back to spawn cell.`,
@@ -787,6 +1101,10 @@ export class WorldScene extends Phaser.Scene {
           npc.shadow.destroy();
           npc.indicator?.destroy();
           npc.overheadContainer?.destroy();
+          npc.helperBadge?.destroy();
+          npc.thinkingBadge?.container.destroy();
+          npc.thinkingBadge?.maskGfx.destroy();
+          npc.transitBadge?.destroy();
         },
       });
       if (npc.overheadContainer) {
@@ -804,6 +1122,7 @@ export class WorldScene extends Phaser.Scene {
     // until the walk-out completes (we hold `npc` in closure).
     this.npcs.delete(id);
     this.npcPaths.delete(id);
+    this.npcSeatOffset.delete(id);
 
     if (shouldWalkOut) {
       // Drive the walk manually via two parallel tweens — the sprite and
@@ -854,7 +1173,17 @@ export class WorldScene extends Phaser.Scene {
     const resting = emojiForActivity(toolName, state);
     npc.overheadBaselineEmoji = resting;
     if (isError) {
-      npc.overheadErrorUntil = this.time.now + 800;
+      npc.overheadErrorUntil = this.time.now + 2000;
+      // Red sprite tint for 2s — visible even when zoomed out so a
+      // crashed agent is obvious without watching the pill.
+      try {
+        npc.sprite.setTint(0xef4444);
+        this.time.delayedCall(2000, () => {
+          if (npc.sprite && npc.sprite.scene) npc.sprite.clearTint();
+        });
+      } catch {
+        // sprite torn down — ignore
+      }
     }
     this.renderPill(npcId);
   }
@@ -880,19 +1209,29 @@ export class WorldScene extends Phaser.Scene {
       : npc.overheadBaselineEmoji ?? IDLE_EMOJI;
     emoji.setText(activeEmoji);
 
-    // Lay out: [padding code · padding emoji padding]
-    const PAD_X = 4;
-    const GAP = 4;
+    const bg = npc.overheadBg;
+    bg.clear();
+
+    // Compact mode (default): only the activity emoji is visible
+    // above the agent. The name + chip background appear on hover.
+    if (!npc.pillHover) {
+      code.setVisible(false);
+      emoji.setPosition(-emoji.width / 2, 0);
+      return;
+    }
+
+    // Hover mode: full pill — [padding code · padding emoji padding]
+    code.setVisible(true);
+    const PAD_X = 6;
+    const GAP = 5;
     const codeW = code.width;
     const emojiW = emoji.width;
     const innerW = codeW + GAP + emojiW;
     const w = innerW + PAD_X * 2;
-    const h = Math.max(code.height, emoji.height) + 4;
+    const h = Math.max(code.height, emoji.height) + 6;
     code.setPosition(-w / 2 + PAD_X, 0);
     emoji.setPosition(-w / 2 + PAD_X + codeW + GAP, 0);
 
-    const bg = npc.overheadBg;
-    bg.clear();
     bg.fillStyle(0xffffff, 0.95);
     bg.fillRoundedRect(-w / 2, -h / 2, w, h, 3);
     bg.lineStyle(1, 0x1b1e2b, 1);
@@ -993,8 +1332,15 @@ export class WorldScene extends Phaser.Scene {
         const oldZoom = cam.zoom;
         const step = Math.min(0.15, Math.abs(dy) * 0.0015);
         const direction = dy > 0 ? -1 : 1;
+        // Lower bound: zoom out cannot go past the cover-fit ratio,
+        // otherwise the map is smaller than the viewport and the user
+        // sees chrome bands. Upper bound: hard cap at ZOOM_MAX.
+        const minCover = this.mapPixelW
+          ? Math.max(cam.width / this.mapPixelW, cam.height / this.mapPixelH)
+          : ZOOM_MIN;
+        const lo = Math.max(ZOOM_MIN, minCover);
         const nextZoom = Math.max(
-          ZOOM_MIN,
+          lo,
           Math.min(ZOOM_MAX, oldZoom * Math.exp(direction * step)),
         );
         if (Math.abs(nextZoom - oldZoom) < 0.0005) return;
@@ -1143,7 +1489,46 @@ export class WorldScene extends Phaser.Scene {
     this.tickChoreoDecay();
     this.tickFollowCamera();
     this.tickOverheadPills();
+    this.tickTransitBadges();
+    this.tickThinkingBadges();
     this.drawTethers();
+    this.drawDebugOverlay();
+  }
+
+  /**
+   * Debug inspector — toggled by `D`. Draws a red border around every
+   * Tiled object (rooms, seats, decor, collision) and a green dot at
+   * each NPC's tile-anchor cell so you can see what coordinate the
+   * pathfinder + render layout are actually using.
+   */
+  private drawDebugOverlay() {
+    const gfx = this.debugGfx;
+    if (!gfx || !this.debugVisible) return;
+    gfx.clear();
+
+    // Tiled objects — red rectangles. Slight color variation by
+    // category so collision/seat/decor are tellable apart at a glance:
+    //   - Collidable (walls): solid red
+    //   - Seats: orange-red
+    //   - Other rects (rooms, decor): pink-red, thinner
+    for (const o of this.debugObjects) {
+      const color = o.collidable ? 0xff2222 : o.seat ? 0xff7733 : 0xff66aa;
+      const alpha = o.collidable ? 0.95 : 0.7;
+      gfx.lineStyle(o.collidable ? 2 : 1, color, alpha);
+      gfx.strokeRect(o.x, o.y, o.width, o.height);
+    }
+
+    // NPC anchor cells — bright green dot at the (col,row) tile center
+    // the rest of the system uses for pathfinding and pill placement.
+    for (const [, npc] of this.npcs) {
+      if (!npc.sprite || !npc.sprite.scene) continue;
+      const cx = npc.col * TILE_SIZE + TILE_SIZE / 2;
+      const cy = npc.row * TILE_SIZE + TILE_SIZE / 2;
+      gfx.fillStyle(0x22c55e, 1);
+      gfx.fillCircle(cx, cy, 4);
+      gfx.lineStyle(1, 0x000000, 0.8);
+      gfx.strokeCircle(cx, cy, 4);
+    }
   }
 
   /** Keep the always-on overhead pill glued above its sprite every frame.
@@ -1162,12 +1547,200 @@ export class WorldScene extends Phaser.Scene {
       // of higher NPCs' pills. Using sprite.y is a fine proxy.
       npc.overheadContainer.setDepth(1600 + npc.sprite.y);
 
+      // Pin the HELPER badge above the pill (sub-agents only).
+      // Sits one row above the pill so it doesn't fight the thinking
+      // badge for vertical space.
+      if (npc.helperBadge) {
+        npc.helperBadge.setPosition(
+          npc.sprite.x,
+          npc.sprite.y - TILE_SIZE - 36,
+        );
+        npc.helperBadge.setDepth(1599 + npc.sprite.y);
+      }
+
       if (
         npc.overheadErrorUntil !== undefined &&
         this.time.now >= npc.overheadErrorUntil
       ) {
         npc.overheadErrorUntil = undefined;
         this.renderPill(id);
+      }
+    }
+  }
+
+  /**
+   * Pull the most recent thinking excerpt from useAgentStore and float it
+   * just below the overhead pill. Auto-expires after THINKING_BADGE_TTL_MS
+   * of no change so a stale "thinking..." line doesn't sit there forever
+   * once the agent moves on to a tool call.
+   */
+  private tickThinkingBadges() {
+    const thinking = useAgentStore.getState().thinkingByAgent;
+    const now = this.time.now;
+    const TTL = 6000;
+    // Visible width of the marquee box. Kept small so the badge
+    // never sprawls — anything longer scrolls inside the box.
+    const BOX_W = 72;
+    const BOX_H = 14;
+    const PAD_X = 4;
+    // Pixels per second the text scrolls right-to-left.
+    const SCROLL_SPEED = 22;
+    // Gap between the end of one scroll-cycle and the start of the
+    // next so the text reads as a loop rather than a smear.
+    const TAIL_GAP = 28;
+
+    for (const [id, npc] of this.npcs) {
+      if (!npc.sprite || !npc.sprite.scene) continue;
+      // Suppress while in transit — the walk badge owns that slot.
+      const isTransiting = !!npc.transitTarget;
+      const raw = isTransiting ? "" : thinking[id];
+      const text = raw ? raw.replace(/\s+/g, " ").trim() : "";
+
+      // Reset TTL whenever the text changes.
+      if (text && text !== npc.thinkingText) {
+        npc.thinkingText = text;
+        npc.thinkingUpdatedAt = now;
+      }
+
+      const expired =
+        npc.thinkingUpdatedAt !== undefined &&
+        now - npc.thinkingUpdatedAt > TTL;
+
+      if (!text || expired) {
+        if (npc.thinkingBadge) {
+          npc.thinkingBadge.container.destroy();
+          npc.thinkingBadge.maskGfx.destroy();
+          npc.thinkingBadge = undefined;
+        }
+        npc.thinkingText = undefined;
+        npc.thinkingUpdatedAt = undefined;
+        continue;
+      }
+
+      // Build (or reuse) the badge.
+      if (!npc.thinkingBadge || npc.thinkingBadge.text.text !== text) {
+        npc.thinkingBadge?.container.destroy();
+        npc.thinkingBadge?.maskGfx.destroy();
+        const container = this.add.container(0, 0).setAlpha(0.95);
+        const bg = this.add.graphics();
+        // The chip's background — solid paper-dim with mint border so
+        // it reads as a UI affordance, not a void rectangle.
+        bg.fillStyle(0x141827, 0.95);
+        bg.fillRoundedRect(-BOX_W / 2, -BOX_H / 2, BOX_W, BOX_H, 3);
+        bg.lineStyle(1, 0x2a3150, 1);
+        bg.strokeRoundedRect(-BOX_W / 2, -BOX_H / 2, BOX_W, BOX_H, 3);
+
+        // Only the text scrolls; mask it (NOT the bg) so the chip's
+        // border + fill stay visible at the box's full width and the
+        // characters cleanly disappear at the edges.
+        const t = this.add.text(0, 0, text, {
+          fontFamily: '"Press Start 2P", monospace',
+          fontSize: "8px",
+          color: "#d5d8ff",
+          resolution: 3,
+        });
+        t.setOrigin(0, 0.5);
+        const measured = t.width;
+        const innerW = BOX_W - PAD_X * 2;
+        const overflows = measured > innerW;
+
+        // Initial text x: left-aligned (with PAD) when it fits, otherwise
+        // start at the left edge so the marquee scrolls leftward.
+        if (overflows) {
+          t.setPosition(-BOX_W / 2 + PAD_X, 0);
+        } else {
+          t.setPosition(-measured / 2, 0);
+        }
+
+        container.add(bg);
+        container.add(t);
+
+        // Mask the TEXT to the inner box. The mask must follow the
+        // container's world position each frame — Phaser geometry
+        // masks read the gfx's world transform.
+        const maskGfx = this.make
+          .graphics({ x: 0, y: 0 })
+          .fillRect(-innerW / 2, -BOX_H / 2 + 1, innerW, BOX_H - 2);
+        const mask = maskGfx.createGeometryMask();
+        t.setMask(mask);
+
+        npc.thinkingBadge = {
+          container,
+          bg,
+          text: t,
+          maskGfx,
+          pixelWidth: measured,
+          boxWidth: innerW,
+          boxHeight: BOX_H,
+        };
+      }
+
+      const badge = npc.thinkingBadge!;
+      // Marquee: scroll the text leftward when it doesn't fit.
+      const overflows = badge.pixelWidth > badge.boxWidth;
+      if (overflows) {
+        const cycle = badge.pixelWidth + TAIL_GAP;
+        const elapsedMs = now - (npc.thinkingUpdatedAt ?? now);
+        const offset = ((elapsedMs / 1000) * SCROLL_SPEED) % cycle;
+        badge.text.setX(-BOX_W / 2 + PAD_X - offset);
+      }
+      // Pin to sprite each frame so it follows movement.
+      const cx = npc.sprite.x;
+      const cy = npc.sprite.y - TILE_SIZE - 22;
+      badge.container.setPosition(cx, cy);
+      badge.container.setDepth(1599 + npc.sprite.y);
+      // The mask gfx isn't a child of the container — it lives in
+      // world space, so we have to follow the container manually.
+      badge.maskGfx.setPosition(cx, cy);
+    }
+  }
+
+  /**
+   * Render a small "🚶 → Library" subtitle below the pill while the
+   * agent is mid-path. The label tracks the destination room so the
+   * user knows the movement was intentional, not random.
+   */
+  private tickTransitBadges() {
+    for (const [, npc] of this.npcs) {
+      if (!npc.sprite || !npc.sprite.scene) continue;
+      const target = npc.transitTarget;
+      const text = target
+        ? `🚶 → ${roomById(target)?.label ?? target}`
+        : "";
+
+      if (!text) {
+        if (npc.transitBadge) {
+          npc.transitBadge.destroy();
+          npc.transitBadge = undefined;
+          npc.transitText = undefined;
+        }
+        continue;
+      }
+
+      if (!npc.transitBadge) {
+        npc.transitBadge = this.add
+          .text(npc.sprite.x, npc.sprite.y - TILE_SIZE - 22, text, {
+            fontFamily: '"Press Start 2P", monospace',
+            fontSize: "8px",
+            color: "#6ee7b7",
+            backgroundColor: "#141827",
+            padding: { x: 4, y: 2 },
+            resolution: 3,
+          })
+          .setOrigin(0.5, 1)
+          .setDepth(1599 + npc.sprite.y)
+          .setAlpha(0.95);
+        npc.transitText = text;
+      } else {
+        if (npc.transitText !== text) {
+          npc.transitBadge.setText(text);
+          npc.transitText = text;
+        }
+        npc.transitBadge.setPosition(
+          npc.sprite.x,
+          npc.sprite.y - TILE_SIZE - 22,
+        );
+        npc.transitBadge.setDepth(1599 + npc.sprite.y);
       }
     }
   }
@@ -1206,7 +1779,9 @@ export class WorldScene extends Phaser.Scene {
       if (!pid) continue;
       const parent = this.npcs.get(pid);
       if (!parent) continue;
-      this.tetherGfx.lineStyle(1, 0x0f380f, 0.45);
+      // Mint-dark — same as the in-app accent so the tether reads as
+      // a UI affordance, not part of the world tile palette.
+      this.tetherGfx.lineStyle(2, 0x22c55e, 0.8);
       // Draw 5 small dashes between the two sprites.
       const segments = 5;
       for (let i = 0; i < segments; i++) {
@@ -1248,10 +1823,10 @@ export class WorldScene extends Phaser.Scene {
 
     // Find a free tile near the anchor — anchor itself or adjacent
     let target = { col: anchor.col, row: anchor.row };
-    if (
-      !this.isWalkableHere(target.col, target.row) ||
-      this.isEntityAt(target.col, target.row, npcId)
-    ) {
+    let targetFound =
+      this.isWalkableHere(target.col, target.row) &&
+      !this.isEntityAt(target.col, target.row, npcId);
+    if (!targetFound) {
       const candidates = [
         [anchor.col + 1, anchor.row],
         [anchor.col - 1, anchor.row],
@@ -1261,8 +1836,32 @@ export class WorldScene extends Phaser.Scene {
       for (const [c, r] of candidates) {
         if (this.isWalkableHere(c, r) && !this.isEntityAt(c, r, npcId)) {
           target = { col: c, row: r };
+          targetFound = true;
           break;
         }
+      }
+    }
+    // Anchor cluster fully blocked — scan the whole room rect for any
+    // walkable, unoccupied cell. Without this, a crowded room silently
+    // refuses new arrivals and they freeze in the corridor.
+    if (!targetFound) {
+      const region = getRoomRegions().find((r) => r.id === room);
+      if (region) {
+        outer: for (let r = region.rowMin; r <= region.rowMax; r++) {
+          for (let c = region.colMin; c <= region.colMax; c++) {
+            if (this.isWalkableHere(c, r) && !this.isEntityAt(c, r, npcId)) {
+              target = { col: c, row: r };
+              targetFound = true;
+              break outer;
+            }
+          }
+        }
+      }
+      if (!targetFound) {
+        console.warn(
+          `[walkNpcToRoom] room "${room}" is full — ${npcId} stays put`,
+        );
+        return;
       }
     }
 
@@ -1274,6 +1873,9 @@ export class WorldScene extends Phaser.Scene {
     const path = bfs(npc.col, npc.row, target.col, target.row, { blocked });
     if (path.length <= 1) return;
     this.npcPaths.set(npcId, path.slice(1));
+    // Stash the destination room on the entity so the transit badge
+    // ("→ Library") can render until the path drains.
+    npc.transitTarget = room;
   }
 
   private isEntityAt(col: number, row: number, exceptNpcId?: string): boolean {
@@ -1299,9 +1901,11 @@ export class WorldScene extends Phaser.Scene {
       const next = path.shift();
       if (!next) {
         this.npcPaths.delete(id);
+        npc.transitTarget = undefined;
         try {
-          npc.sprite.stop();
-          npc.sprite.setFrame(FRAME[npc.facing][0]);
+          // Drop into the per-character idle loop so the agent looks
+          // alive at rest instead of holding a single frame.
+          this.playIdleAnim(npc);
         } catch {
           // sprite torn down while we were iterating — ignore
         }
@@ -1317,8 +1921,16 @@ export class WorldScene extends Phaser.Scene {
       const dir: Direction = dc > 0 ? "right" : dc < 0 ? "left" : dr > 0 ? "down" : "up";
       npc.facing = dir;
       npc.sprite.play(`${npc.animKey}-walk-${dir}`, true);
-      const targetX = next.col * TILE_SIZE + TILE_SIZE / 2;
-      const targetY = next.row * TILE_SIZE + TILE_SIZE / 2;
+      // On the LAST step of a seat-bound path, prefer the seat's
+      // authored pixel center (via npcSeatOffset). Cleared on arrival.
+      const isLastStep = path.length === 0;
+      const offset = isLastStep ? this.npcSeatOffset.get(id) : undefined;
+      const targetX = offset
+        ? offset.px
+        : next.col * TILE_SIZE + TILE_SIZE / 2;
+      const targetY = offset
+        ? offset.py
+        : next.row * TILE_SIZE + TILE_SIZE / 2;
       npc.tween = this.tweens.add({
         targets: npc.sprite,
         x: targetX,
@@ -1330,6 +1942,24 @@ export class WorldScene extends Phaser.Scene {
           npc.row = next.row;
           npc.sprite.setDepth(1000 + next.row);
           npc.tween = undefined;
+          if (offset) {
+            // Force facing toward camera so seated agents look out at
+            // the player rather than wherever the last step came from.
+            npc.facing = "down";
+            try {
+              npc.sprite.stop();
+              // Swap to the seated pose from the per-character sit
+              // sheet. Frame 0 of the matching direction is the
+              // resting "sat at desk" silhouette.
+              npc.sprite.setTexture(npc.sitSheetKey, SIT_FRAME.down);
+            } catch {
+              // sprite torn down mid-tween — ignore
+            }
+            this.npcSeatOffset.delete(id);
+            // Sit-down choreo: brief settle + breathing yoyo so the
+            // seated pose reads as intentional rather than frozen.
+            this.startChoreoFor(npc, "sit-down");
+          }
         },
       });
       this.tweens.add({
@@ -1434,28 +2064,18 @@ export class WorldScene extends Phaser.Scene {
     // the next non-Task activity.
     if (entity.helper) return;
 
-    const HELPER_TILE = 111; // dwarf/helmeted figure from Kenney Tiny Dungeon
+    // Pick a Modern character that is NOT the parent's. Hash the
+    // sub-agent type so the same task tool (e.g. "general-purpose")
+    // always produces the same helper face.
     const tintSeed = (subagentType ?? "default")
       .split("")
       .reduce((h, c) => (h * 31 + c.charCodeAt(0)) | 0, 0);
-    const tints: Array<{ l: string; L: string }> = [
-      { l: "#ffaa44", L: "#ffd18e" },
-      { l: "#4a90e2", L: "#a3c5ff" },
-      { l: "#2a9d8f", L: "#8ddccf" },
-      { l: "#b5838d", L: "#e5c7ce" },
-      { l: "#7b68ee", L: "#b8a5ff" },
-    ];
-    const tint = tints[Math.abs(tintSeed) % tints.length];
-
-    const helperKey = `gb_helper_${entity.def.id}_${Date.now()}`;
-    // Synthesize sheet from tile 111. Reuse the same pipeline as the main
-    // NPC textures.
-    try {
-      this.ensureCharacterTexture(helperKey, HELPER_TILE, tint);
-    } catch {
-      return;
-    }
-    this.ensureAnimsFor(helperKey, helperKey);
+    const parentChar = this.characterForNpc(entity.def.id);
+    const candidates = MODERN_CHARS.filter((c) => c !== parentChar);
+    const helperChar =
+      candidates[Math.abs(tintSeed) % candidates.length] ?? parentChar;
+    const helperKey = MODERN_KEY(helperChar);
+    this.ensureAnimsForSheet(helperKey);
 
     // Spawn 1 tile behind the parent's facing direction.
     const [dc, dr] = dirDelta(oppositeDir(entity.facing));
@@ -1464,9 +2084,10 @@ export class WorldScene extends Phaser.Scene {
 
     const sprite = this.add
       .sprite(spawnPx, spawnPy, helperKey, 0)
-      // Helper at 1.5x — half of normal sub-agent scale (1.6) ish, keeps
-      // it visibly subordinate. Tied to the 32px-tile world.
-      .setScale(1.5)
+      // Helper at 0.75 — visibly smaller than its parent (1) so it reads
+      // as a subordinate. Modern sprites are 16w × 32h native, so this
+      // is the same proportional reduction that the old 1.5/2 was.
+      .setScale(0.75)
       .setDepth(entity.sprite.depth - 1);
 
     // Floating emoji above the helper — scroll.

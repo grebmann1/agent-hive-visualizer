@@ -144,7 +144,6 @@ function FALLBACK_REGIONS(): RoomRegion[] {
     { id: "testing_lab",   colMin: 31, colMax: 37, rowMin: 1,  rowMax: 6  },
     { id: "tool_workshop", colMin: 39, colMax: 45, rowMin: 1,  rowMax: 6  },
     { id: "meeting_room",  colMin: 29, colMax: 37, rowMin: 8,  rowMax: 12 },
-    { id: "cinema",        colMin: 31, colMax: 35, rowMin: 14, rowMax: 16 },
   ];
 }
 
@@ -162,6 +161,5 @@ function FALLBACK_ANCHOR_DETAILS(): Record<RoomId, RoomAnchor> {
     testing_lab:   mk("testing_lab",   "Security",     34, 3),
     tool_workshop: mk("tool_workshop", "War Room",     42, 3),
     meeting_room:  mk("meeting_room",  "Meeting Room", 33, 10),
-    cinema:        mk("cinema",        "Lounge",       33, 15),
   };
 }

@@ -13,7 +13,7 @@ export default function Home() {
   return (
     <div className="min-h-screen bg-page flex flex-col">
       <header className="title-strip px-4 py-1.5 flex items-center justify-between">
-        <h1 className="pixel-font text-[16px] tracking-wide">◆ AGENTQUEST</h1>
+        <h1 className="pixel-font text-[16px] tracking-wide">◆ AGENT FORCE HQ</h1>
         <div className="flex items-center gap-3 text-[11px] opacity-75">
           <StatusStrip />
         </div>

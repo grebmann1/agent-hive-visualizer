@@ -30,7 +30,7 @@ export default function Intro() {
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4">
       <div className="dialog-box max-w-lg w-full">
         <div className="pixel-font text-[13px] text-accent-dark mb-3">
-          ◆ WELCOME TO AGENTQUEST
+          ◆ WELCOME TO AGENT FORCE HQ
         </div>
         <p className="text-[15px] leading-relaxed mb-4">
           A 2D observatory for your local Claude agents. Every live{" "}
@@ -58,8 +58,8 @@ export default function Intro() {
           </li>
         </ul>
         <p className="text-[13px] text-ink-soft mb-5">
-          Install hooks on first run so AgentQuest can see agent activity in
-          real time. No outbound network — everything runs over 127.0.0.1.
+          Install hooks on first run so Agent Force HQ can see agent activity
+          in real time. No outbound network — everything runs over 127.0.0.1.
         </p>
         <button onClick={dismiss} className="btn btn-primary w-full">
           LET&apos;S GO ▸

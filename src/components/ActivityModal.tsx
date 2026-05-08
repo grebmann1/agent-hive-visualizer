@@ -8,6 +8,8 @@ import type { DynamicNpc } from "../stores/useNpcStore";
 import { useTerminalStore } from "../stores/useTerminalStore";
 import { npcById } from "../game/npcs";
 import { buildToolMessage, shortPath } from "./tool-format";
+import { formatState, formatTool } from "../events/stateToRoom";
+import type { AgentState } from "../events/types";
 
 const THINKING_SNIPPET_LEN = 120;
 const RESULT_SNIPPET_LEN = 160;
@@ -28,7 +30,14 @@ export default function ActivityModal() {
   const events = useAgentStore((s) => s.events);
   const usageByAgent = useAgentStore((s) => s.usageByAgent);
   const sessionByAgent = useAgentStore((s) => s.sessionByAgent);
+  const clearError = useAgentStore((s) => s.clearError);
   const dynamics = useNpcStore((s) => s.dynamic);
+
+  // Opening the modal counts as "user has seen the error"; clear the
+  // sticky chip in the roster.
+  useEffect(() => {
+    if (open && npcId) clearError(npcId);
+  }, [open, npcId, clearError]);
 
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [showTools, setShowTools] = useState(true);
@@ -197,10 +206,10 @@ export default function ActivityModal() {
               <button
                 type="button"
                 onClick={onTerminalClick}
-                className="pixel-font text-[9px] tracking-wide px-1.5 py-0.5 rounded border border-ink bg-paper-dim hover:bg-accent hover:text-ink cursor-pointer"
+                className="pixel-font text-[9px] tracking-wide px-1.5 py-0.5 rounded border border-ink bg-paper-dim hover:bg-accent hover:text-paper-dim cursor-pointer"
                 title="Focus the terminal that started this agent"
               >
-                ⌨ TERM
+                ⌨ TERMINAL
               </button>
             ) : isExternal ? (
               <span className="pixel-font text-[9px] text-ink-soft tracking-wide">
@@ -218,7 +227,7 @@ export default function ActivityModal() {
             className="pixel-font text-[9px] px-2 py-1 rounded border-2 border-ink tracking-wide"
             style={{
               background: showTools ? "var(--accent)" : "var(--paper-dim)",
-              color: showTools ? "var(--ink)" : "var(--ink-soft)",
+              color: showTools ? "var(--paper-dim)" : "var(--ink-soft)",
             }}
           >
             {showTools ? "● " : "○ "}TOOLS
@@ -229,7 +238,7 @@ export default function ActivityModal() {
             className="pixel-font text-[9px] px-2 py-1 rounded border-2 border-ink tracking-wide"
             style={{
               background: showThinking ? "var(--accent)" : "var(--paper-dim)",
-              color: showThinking ? "var(--ink)" : "var(--ink-soft)",
+              color: showThinking ? "var(--paper-dim)" : "var(--ink-soft)",
             }}
           >
             {showThinking ? "● " : "○ "}THINKING
@@ -240,7 +249,7 @@ export default function ActivityModal() {
             className="pixel-font text-[9px] px-2 py-1 rounded border-2 border-ink tracking-wide"
             style={{
               background: showChat ? "var(--accent)" : "var(--paper-dim)",
-              color: showChat ? "var(--ink)" : "var(--ink-soft)",
+              color: showChat ? "var(--paper-dim)" : "var(--ink-soft)",
             }}
           >
             {showChat ? "● " : "○ "}CHAT
@@ -260,7 +269,9 @@ export default function ActivityModal() {
           >
             {entries.map((e, i) => {
               const when = formatTime(e.timestamp);
-              const label = e.state ?? e.type.replace(/^agent\./, "");
+              const label = e.state
+                ? formatState(e.state as AgentState)
+                : e.type.replace(/^agent\./, "");
               const meta = (e.metadata ?? {}) as EventMeta;
               const isResult = e.type === "agent.tool.result";
               const isError = isResult && meta.isError;
@@ -350,8 +361,11 @@ export default function ActivityModal() {
                       {label.toUpperCase()}
                     </span>
                     {resolvedToolName && (
-                      <span className="pixel-font text-[9px] text-ink-soft tracking-wide">
-                        {resolvedToolName}
+                      <span
+                        className="pixel-font text-[9px] text-ink-soft tracking-wide"
+                        title={resolvedToolName}
+                      >
+                        {formatTool(resolvedToolName)}
                       </span>
                     )}
                     {marker && (

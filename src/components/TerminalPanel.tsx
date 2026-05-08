@@ -112,12 +112,12 @@ export default function TerminalPanel({
               </p>
               <p className="text-[12px] opacity-75 mb-4 max-w-[300px]">
                 Start a new shell or spin up a Claude agent directly inside
-                AgentQuest.
+                Agent Force HQ.
               </p>
               <button
                 type="button"
                 onClick={onRequestNew}
-                className="pixel-font text-[10px] px-3 py-2 rounded border-2 border-ink bg-accent text-ink hover:bg-accent-dark tracking-wide"
+                className="pixel-font text-[10px] px-3 py-2 rounded border-2 border-ink bg-accent text-paper-dim hover:bg-accent-dark hover:text-paper-dim tracking-wide"
               >
                 + NEW AGENT
               </button>

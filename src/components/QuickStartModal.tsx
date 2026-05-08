@@ -264,7 +264,7 @@ export default function QuickStartModal({
               type="button"
               onClick={launch}
               disabled={busy || !cwd}
-              className="pixel-font text-[9px] px-3 py-2 rounded border-2 border-ink bg-accent text-ink hover:bg-accent-dark tracking-wide disabled:opacity-40 disabled:cursor-not-allowed"
+              className="pixel-font text-[9px] px-3 py-2 rounded border-2 border-ink bg-accent text-paper-dim hover:bg-accent-dark hover:text-paper-dim tracking-wide disabled:opacity-40 disabled:cursor-not-allowed"
             >
               {busy ? "STARTING…" : "▸ LAUNCH"}
             </button>

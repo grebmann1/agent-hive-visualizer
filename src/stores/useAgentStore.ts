@@ -62,6 +62,12 @@ interface AgentStoreState {
   // Most recent `thinking` excerpt per agent. Short, truncated string.
   thinkingByAgent: Record<string, string>;
 
+  // Sticky error state per agent. Set when a tool_result with isError
+  // arrives or when an agent.error event fires; cleared by
+  // clearError(agentId) when the user opens the activity modal so the
+  // chip persists across the brief on-canvas flash.
+  errorByAgent: Record<string, { message: string; at: number }>;
+
   // Session metadata (model, tools, sessionId) per agent, populated from
   // the transcript's `system_init` line.
   sessionByAgent: Record<string, AgentSessionInfo>;
@@ -82,6 +88,7 @@ interface AgentStoreState {
     turnCount?: number,
   ) => void;
   applySession: (agentId: string, info: AgentSessionInfo) => void;
+  clearError: (agentId: string) => void;
   reset: () => void;
 }
 
@@ -97,6 +104,7 @@ const initial = {
   activities: {} as Record<string, NpcActivity>,
   usageByAgent: {} as Record<string, AgentUsage>,
   thinkingByAgent: {} as Record<string, string>,
+  errorByAgent: {} as Record<string, { message: string; at: number }>,
   sessionByAgent: {} as Record<string, AgentSessionInfo>,
   eventsByAgent: {} as Record<string, AgentEvent[]>,
 };
@@ -124,6 +132,19 @@ export const useAgentStore = create<AgentStoreState>((set) => ({
     const thinkingText =
       event.type === "agent.thinking"
         ? (event.metadata as { text?: string } | undefined)?.text
+        : undefined;
+
+    // Sticky error: any tool_result with isError, plus dedicated
+    // agent.error events. The chip persists until clearError() is
+    // called (typically when the user opens the activity modal).
+    const errorMeta =
+      (event.type === "agent.tool.result" &&
+        (event.metadata as { isError?: boolean } | undefined)?.isError) ||
+      event.type === "agent.error"
+        ? {
+            message: event.message || "Tool error",
+            at: Date.now(),
+          }
         : undefined;
 
     // "Passive" events — tool_result (success), text turn-end, thinking —
@@ -181,6 +202,9 @@ export const useAgentStore = create<AgentStoreState>((set) => ({
         thinkingByAgent: thinkingText
           ? { ...s.thinkingByAgent, [event.agentId]: thinkingText }
           : s.thinkingByAgent,
+        errorByAgent: errorMeta
+          ? { ...s.errorByAgent, [event.agentId]: errorMeta }
+          : s.errorByAgent,
         eventsByAgent: {
           ...s.eventsByAgent,
           [event.agentId]: nextAgentEvents,
@@ -207,6 +231,13 @@ export const useAgentStore = create<AgentStoreState>((set) => ({
     set((s) => ({
       sessionByAgent: { ...s.sessionByAgent, [agentId]: info },
     })),
+
+  clearError: (agentId) =>
+    set((s) => {
+      if (!s.errorByAgent[agentId]) return s;
+      const { [agentId]: _gone, ...rest } = s.errorByAgent;
+      return { errorByAgent: rest };
+    }),
 
   reset: () => set({ ...initial }),
 }));

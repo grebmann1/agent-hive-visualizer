@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { useGameStore } from "../stores/useGameStore";
 import { useToastStore } from "../stores/useToastStore";
 
@@ -11,14 +12,48 @@ export default function HudOverlay() {
 
   return (
     <>
-      {/* BR slot — mouse/controls hint */}
-      {!dialogActive && (
-        <div className="hud-chip absolute bottom-2 right-2 z-10">
-          DRAG &middot; SCROLL ZOOM &middot; CLICK AGENT
-        </div>
-      )}
+      {!dialogActive && <ControlsHint />}
       <ToastSlot />
     </>
+  );
+}
+
+// Marquee-style controls hint. Auto-shows on mount for a few seconds,
+// then fades away so the chip doesn't clutter the canvas. Hovering the
+// game panel or pressing `?` brings it back via the shortcuts modal.
+function ControlsHint() {
+  const [visible, setVisible] = useState(true);
+  useEffect(() => {
+    // Visible long enough to read the rolling text twice (~2 cycles
+    // at 12 s each), then fade out.
+    const t = setTimeout(() => setVisible(false), 8000);
+    return () => clearTimeout(t);
+  }, []);
+
+  if (!visible) return null;
+
+  return (
+    <div
+      className="hud-chip absolute bottom-2 right-2 z-10 overflow-hidden"
+      style={{
+        width: 160,
+        opacity: visible ? 1 : 0,
+        transition: "opacity 600ms ease",
+      }}
+    >
+      <div
+        className="whitespace-nowrap"
+        style={{
+          // The text is doubled inside so the loop seam is invisible.
+          // Translates from 0 → -50% across MARQUEE_DURATION.
+          animation: "hudMarquee 12s linear infinite",
+        }}
+      >
+        DRAG &middot; SCROLL ZOOM &middot; CLICK AGENT &middot; HOVER FOR
+        NAME &nbsp;&nbsp;&nbsp; DRAG &middot; SCROLL ZOOM &middot; CLICK
+        AGENT &middot; HOVER FOR NAME &nbsp;&nbsp;&nbsp;
+      </div>
+    </div>
   );
 }
 

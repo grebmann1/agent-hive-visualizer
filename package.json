@@ -1,9 +1,9 @@
 {
   "name": "agentquest",
-  "productName": "AgentQuest",
+  "productName": "Agent Force HQ",
   "version": "0.1.0",
   "description": "A 2D pixel-art world where every AI agent becomes a visible character. Monitors local Claude CLI processes in real time.",
-  "author": "AgentQuest",
+  "author": "Agent Force HQ",
   "main": "electron/main.js",
   "private": true,
   "scripts": {
@@ -48,7 +48,7 @@
   },
   "build": {
     "appId": "com.agentquest.app",
-    "productName": "AgentQuest",
+    "productName": "Agent Force HQ",
     "afterSign": "build/notarize.js",
     "asar": false,
     "files": [

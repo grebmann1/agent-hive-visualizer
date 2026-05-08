@@ -62,11 +62,11 @@ export const ROOMS: RoomDef[] = [
     tags: ["testing", "trials", "verify"],
   },
   {
-    id: "cinema",
-    label: "Lounge",
+    id: "meeting_room",
+    label: "Meeting Room",
     description:
-      "Off-duty. Agents chill here when they have nothing to do, waiting to be called.",
-    tags: ["idle", "rest", "chill"],
+      "Stand-up + sub-agent handoffs. Where agents go when they delegate to a helper.",
+    tags: ["meeting", "task", "subagent"],
   },
 ];
 

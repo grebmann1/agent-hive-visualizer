@@ -1,6 +1,6 @@
 "use client";
 
-// First-launch nudge: asks the user to install AgentQuest's hooks into
+// First-launch nudge: asks the user to install Agent Force HQ's hooks into
 // `~/.claude/settings.json` so we get real-time claude events. Hidden
 // automatically once hooks are detected. Dismissal is rate-limited to
 // 24 h via localStorage so we don't pester on every boot.
@@ -100,15 +100,15 @@ export default function HookSetupBanner() {
           ◆ LIVE HOOKS NOT INSTALLED
         </div>
         <div className="flex-1 opacity-90">
-          AgentQuest hasn&apos;t wired itself into Claude yet. Install hooks to
-          stream every agent event in real-time — no polling, no truncation.
+          Agent Force HQ hasn&apos;t wired itself into Claude yet. Install hooks
+          to stream every agent event in real-time — no polling, no truncation.
         </div>
         {status.kind === "offer" && (
           <>
             <button
               type="button"
               onClick={install}
-              className="pixel-font text-[10px] px-3 py-2 rounded border-2 border-ink bg-accent text-ink hover:bg-accent-dark tracking-wide"
+              className="pixel-font text-[10px] px-3 py-2 rounded border-2 border-ink bg-accent text-paper-dim hover:bg-accent-dark hover:text-paper-dim tracking-wide"
             >
               INSTALL HOOKS
             </button>
@@ -165,7 +165,7 @@ export default function HookSetupBanner() {
           >
             <div className="flex items-center justify-between mb-3">
               <h2 className="pixel-font text-[13px] text-accent-dark">
-                ◆ WHAT AGENTQUEST INSTALLS
+                ◆ WHAT AGENT FORCE HQ INSTALLS
               </h2>
               <button
                 type="button"
