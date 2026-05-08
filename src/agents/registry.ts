@@ -77,6 +77,10 @@ function createAPI(provider: AgentProvider): AgentProviderAPI {
         (agent.metadata as { external?: boolean } | undefined)?.external;
       const realPid =
         (agent.metadata as { realPid?: number } | undefined)?.realPid;
+      const providerId =
+        (agent.metadata as
+          | { provider?: import("../stores/useNpcStore").AgentProviderId }
+          | undefined)?.provider;
       if (!existing) {
         // Create a new NPC from identity + optional parentId + terminalId.
         const npc: DynamicNpc = makeDynamicNpc({
@@ -88,6 +92,7 @@ function createAPI(provider: AgentProvider): AgentProviderAPI {
           parentId,
           terminalId,
           external,
+          provider: providerId,
           pid: realPid,
         });
         store.addDynamic(npc);

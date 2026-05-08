@@ -14,6 +14,57 @@ const http = require("node:http");
 const DEFAULT_PORT = 47329;
 const MAX_BODY_BYTES = 256 * 1024; // way more than any real hook payload
 
+// Whitelist of `hook_event_name` values we expect from Claude. Anything
+// outside this set is logged once but still forwarded — Claude may add
+// new hook types in the future and we want to know about them without
+// silently dropping the event.
+const KNOWN_HOOK_EVENTS = new Set([
+  "SessionStart",
+  "SessionEnd",
+  "UserPromptSubmit",
+  "PreToolUse",
+  "PostToolUse",
+  "PostToolUseFailure",
+  "Stop",
+  "SubagentStop",
+  "Notification",
+  "PermissionRequest",
+  "PreCompact",
+  "PostCompact",
+]);
+
+const seenUnknownEvents = new Set();
+
+/**
+ * Validate a parsed hook payload. Returns `{ ok: true }` for shapes we
+ * trust, or `{ ok: false, reason }` for shapes that should be rejected
+ * with a 400. We're permissive on optional fields (Claude's payloads
+ * carry a long tail of metadata) but strict on the two we always read:
+ * the event name string and the agent identity.
+ */
+function validateHookPayload(payload) {
+  if (!payload || typeof payload !== "object") {
+    return { ok: false, reason: "payload is not an object" };
+  }
+  const event = payload.hook_event_name;
+  if (typeof event !== "string" || event.length === 0) {
+    return { ok: false, reason: "missing hook_event_name" };
+  }
+  // session_id is the canonical agent key; without one we can't route.
+  // The wrapper script sets it from $CLAUDE_SESSION_ID.
+  const session = payload.session_id;
+  if (typeof session !== "string" || session.length === 0) {
+    return { ok: false, reason: "missing session_id" };
+  }
+  if (!KNOWN_HOOK_EVENTS.has(event) && !seenUnknownEvents.has(event)) {
+    seenUnknownEvents.add(event);
+    console.info(
+      `[hook-server] unknown hook event "${event}" — forwarding anyway`,
+    );
+  }
+  return { ok: true };
+}
+
 /**
  * Start a hook-receiver HTTP server. Tries `preferredPort` first and falls
  * back to the next 4 ports if that one is busy. Returns `{ port, stop }`
@@ -55,19 +106,34 @@ function startHookServer(onHook, preferredPort = DEFAULT_PORT) {
       });
       req.on("end", () => {
         if (aborted) return;
+        let parsed;
         try {
-          const parsed = JSON.parse(body);
-          try {
-            onHook(parsed);
-          } catch (err) {
-            console.warn("[hook-server] onHook threw:", err);
-          }
-          res.statusCode = 204;
-          res.end();
-        } catch {
+          parsed = JSON.parse(body);
+        } catch (err) {
+          console.warn(
+            "[hook-server] rejected payload — invalid JSON:",
+            err && err.message ? err.message : err,
+          );
           res.statusCode = 400;
           res.end();
+          return;
         }
+        const check = validateHookPayload(parsed);
+        if (!check.ok) {
+          console.warn(
+            `[hook-server] rejected payload — ${check.reason}. Keys: ${Object.keys(parsed || {}).join(", ")}`,
+          );
+          res.statusCode = 400;
+          res.end();
+          return;
+        }
+        try {
+          onHook(parsed);
+        } catch (err) {
+          console.warn("[hook-server] onHook threw:", err);
+        }
+        res.statusCode = 204;
+        res.end();
       });
     });
 

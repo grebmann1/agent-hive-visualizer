@@ -1,25 +1,55 @@
 "use client";
 
-import { useEffect, useState } from "react";
+// Lightweight first-launch welcome. Replaces the previous full-screen
+// modal — most of its content is duplicated in the `?` shortcuts panel
+// and the HookSetupBanner, so the modal mostly added friction.
+//
+// This component is a small chip pinned to the top-center of the canvas.
+// It auto-dismisses when:
+//   - the user clicks the X,
+//   - the first dynamic agent appears (live activity is its own
+//     onboarding signal — once an NPC walks in, the user has clearly
+//     understood the loop),
+//   - or the user has dismissed it before (localStorage flag).
+//
+// Pressing `?` opens the full shortcuts list, which is the canonical
+// place for keyboard help. The chip just nudges new users toward it.
 
-const KEY = "agentquest_intro_seen_v3";
+import { useEffect, useState } from "react";
+import { useNpcStore } from "../stores/useNpcStore";
+
+const DISMISSED_KEY = "agentquest_intro_seen_v4";
 
 export default function Intro() {
   const [show, setShow] = useState(false);
+  const dynamicCount = useNpcStore((s) => Object.keys(s.dynamic).length);
 
   useEffect(() => {
     try {
-      if (!localStorage.getItem(KEY)) setShow(true);
+      if (!localStorage.getItem(DISMISSED_KEY)) setShow(true);
     } catch {
       setShow(true);
     }
   }, []);
 
+  // Once any dynamic agent has joined, the welcome is no longer needed.
+  // Mark it dismissed so it doesn't reappear next launch either.
+  useEffect(() => {
+    if (!show) return;
+    if (dynamicCount === 0) return;
+    try {
+      localStorage.setItem(DISMISSED_KEY, "1");
+    } catch {
+      // ignore
+    }
+    setShow(false);
+  }, [show, dynamicCount]);
+
   if (!show) return null;
 
   const dismiss = () => {
     try {
-      localStorage.setItem(KEY, "1");
+      localStorage.setItem(DISMISSED_KEY, "1");
     } catch {
       // ignore
     }
@@ -27,44 +57,27 @@ export default function Intro() {
   };
 
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4">
-      <div className="dialog-box max-w-lg w-full">
-        <div className="pixel-font text-[13px] text-accent-dark mb-3">
+    <div
+      className="hud-chip fixed top-12 left-1/2 -translate-x-1/2 z-30 flex items-center gap-3"
+      style={{ pointerEvents: "auto" }}
+    >
+      <div className="flex flex-col gap-0.5">
+        <div className="pixel-font text-[10px] text-accent-dark">
           ◆ WELCOME TO AGENT FORCE HQ
         </div>
-        <p className="text-[15px] leading-relaxed mb-4">
-          A 2D observatory for your local Claude agents. Every live{" "}
-          <code>claude</code> session on your laptop appears here as a
-          wandering NPC.
-        </p>
-        <ul className="space-y-2 mb-4 text-[14px]">
-          <li>
-            <span className="pixel-font text-[10px] text-accent-dark">▸</span>{" "}
-            Drag the floor to pan · scroll to zoom
-          </li>
-          <li>
-            <span className="pixel-font text-[10px] text-accent-dark">▸</span>{" "}
-            Click an agent to chat · right-click for activity + follow
-          </li>
-          <li>
-            <span className="pixel-font text-[10px] text-accent-dark">▸</span>{" "}
-            <kbd className="pixel-font px-1 bg-paper-dim border border-ink rounded">SPACE</kbd> advances dialog ·{" "}
-            <kbd className="pixel-font px-1 bg-paper-dim border border-ink rounded">ESC</kbd> closes it
-          </li>
-          <li>
-            <span className="pixel-font text-[10px] text-accent-dark">▸</span>{" "}
-            <kbd className="pixel-font px-1 bg-paper-dim border border-ink rounded">⌘T</kbd> toggles embedded terminals ·{" "}
-            <kbd className="pixel-font px-1 bg-paper-dim border border-ink rounded">?</kbd> for all shortcuts
-          </li>
-        </ul>
-        <p className="text-[13px] text-ink-soft mb-5">
-          Install hooks on first run so Agent Force HQ can see agent activity
-          in real time. No outbound network — everything runs over 127.0.0.1.
-        </p>
-        <button onClick={dismiss} className="btn btn-primary w-full">
-          LET&apos;S GO ▸
-        </button>
+        <div className="pixel-font text-[9px] text-ink-soft">
+          Run <code>claude</code> in any project — your agent will appear here.
+          Press <kbd>?</kbd> for shortcuts.
+        </div>
       </div>
+      <button
+        onClick={dismiss}
+        className="pixel-font text-[11px] text-ink-soft hover:text-ink"
+        aria-label="Dismiss welcome"
+        style={{ pointerEvents: "auto" }}
+      >
+        ×
+      </button>
     </div>
   );
 }

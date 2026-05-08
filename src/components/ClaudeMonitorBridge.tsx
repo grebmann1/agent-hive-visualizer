@@ -9,6 +9,7 @@
 
 import { useEffect } from "react";
 import { HookProvider } from "../agents/hook-provider";
+import { CursorProvider } from "../agents/cursor-provider";
 import {
   registerProvider,
   startAllProviders,
@@ -39,6 +40,13 @@ function ensureRegistered() {
   // transcript-watcher pipeline has been retired. To add a new source,
   // implement AgentProvider and register here.
   registerProvider(new HookProvider());
+
+  // Cursor provider — opt-in skeleton (no-op until the Cursor IPC is
+  // wired). Behind a feature flag so the default app continues to
+  // surface only Claude sessions.
+  if (process.env.NEXT_PUBLIC_ENABLE_CURSOR_PROVIDER === "true") {
+    registerProvider(new CursorProvider());
+  }
 }
 
 export default function ClaudeMonitorBridge() {

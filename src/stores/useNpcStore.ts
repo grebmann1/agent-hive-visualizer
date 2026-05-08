@@ -21,9 +21,17 @@ export interface DynamicNpc extends NpcDef {
   terminalId?: string;
   // True when this NPC represents a claude session detected OUTSIDE AgentQuest
   // (e.g. started in iTerm, VS Code, or Cursor). Used by the roster to render
-  // an "EXT" chip instead of "LIVE".
+  // an "EXTERNAL" chip instead of "LIVE".
   external?: boolean;
+  // Which AgentProvider produced this NPC. The hook provider produces
+  // "claude" (or "claude-master" for the orchestrator in the future
+  // hive setup); the cursor provider produces "cursor". Used by the
+  // roster to pick a chip color and by the renderer to seed the
+  // character-pool hash so providers visually differ.
+  provider?: AgentProviderId;
 }
+
+export type AgentProviderId = "claude" | "claude-master" | "cursor";
 
 type AnyNpc = NpcDef | DynamicNpc;
 
@@ -43,7 +51,22 @@ export const useNpcStore = create<NpcStoreState>((set, get) => ({
   dynamic: {},
 
   addDynamic: (npc) =>
-    set((s) => ({ dynamic: { ...s.dynamic, [npc.id]: npc } })),
+    set((s) => {
+      // De-duplicate display names: when a second agent shows up with
+      // the same name (common when two sessions share a `cwd` basename
+      // — the default name builder uses `basename(cwd)`), append a
+      // running #1/#2 so the roster row + hover pill aren't ambiguous.
+      const others = Object.values(s.dynamic).filter(
+        (other) => other.id !== npc.id,
+      );
+      const sameNameCount = others.filter(
+        (other) => other.name === npc.name,
+      ).length;
+      const finalName = sameNameCount > 0 ? `${npc.name} #${sameNameCount + 1}` : npc.name;
+      return {
+        dynamic: { ...s.dynamic, [npc.id]: { ...npc, name: finalName } },
+      };
+    }),
 
   removeDynamic: (id) =>
     set((s) => {
@@ -118,6 +141,7 @@ export function makeDynamicNpc(input: {
   parentId?: string;
   terminalId?: string;
   external?: boolean;
+  provider?: AgentProviderId;
 }): DynamicNpc {
   const h = hashId(input.id);
   const palette = DYNAMIC_PALETTES[h % DYNAMIC_PALETTES.length];
@@ -150,6 +174,23 @@ export function makeDynamicNpc(input: {
   // If this is a sub-agent (adopted by a parent via an open Task tool_use),
   // the scene places the sprite next to the parent at scene-layer time. We
   // still set a sensible home room here so pathfinding works after.
+  // Provider-specific home room. Master-hive Claude orchestrators are
+  // intended to live in the future `executive` room (Stage B); until
+  // that rect ships in Tiled, fall back to `desk` so they don't dump
+  // into the corridor on spawn.
+  // TODO(stage-b): swap "desk" → "executive" once the room is authored.
+  const provider = input.provider ?? "claude";
+  const role =
+    provider === "claude-master"
+      ? "Master Claude"
+      : provider === "cursor"
+        ? "Cursor Agent"
+        : input.parentId
+          ? "Sub-agent"
+          : "Claude Agent";
+  const homeRoom: RoomId =
+    provider === "claude-master" ? "desk" : room;
+
   return {
     dynamic: true,
     pid: input.pid,
@@ -157,10 +198,11 @@ export function makeDynamicNpc(input: {
     parentId: input.parentId,
     terminalId: input.terminalId,
     external: input.external,
+    provider,
     id: input.id,
     name: input.name,
-    role: input.parentId ? "Sub-agent" : "Claude Agent",
-    homeRoom: room,
+    role,
+    homeRoom,
     col: anchor.col + offsetCol,
     row: anchor.row + offsetRow,
     tint: palette,

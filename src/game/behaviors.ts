@@ -19,6 +19,26 @@
 
 import type { AgentEvent, RoomId } from "../events/types";
 import type { ChoreoKind } from "./choreo";
+import { buildToolMessage } from "../components/tool-format";
+
+// Capitalize the first letter of a string (in-place, no allocation
+// when empty). Used to turn the lower-case narrative coming from
+// buildToolMessage ("editing a file") into a sentence-cased bubble
+// label ("Editing a file").
+function sentence(s: string): string {
+  if (!s) return s;
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+// Build a describe() that delegates to the canonical tool-format helper.
+// Behaviors only need to provide the fallback they want when no tool is
+// in flight (e.g. an `agent.thinking` event with no metadata.toolName).
+function describeViaToolFormat(event: AgentEvent, fallback: string): string {
+  const tn = (event.metadata as { toolName?: string } | undefined)?.toolName;
+  const input = (event.metadata as { input?: unknown } | undefined)?.input;
+  if (!tn) return fallback;
+  return sentence(buildToolMessage(tn, input));
+}
 
 export interface AgentBehavior {
   id: string;
@@ -30,32 +50,9 @@ export interface AgentBehavior {
   priority?: number;
 }
 
-// Helper to pull a string field out of event.metadata or event.metadata.input.
-function getStr(
-  event: AgentEvent,
-  key: string,
-  path: "metadata" | "input" = "metadata",
-): string | undefined {
-  const src =
-    path === "metadata"
-      ? event.metadata
-      : (event.metadata as { input?: Record<string, unknown> } | undefined)?.input;
-  if (!src || typeof src !== "object") return undefined;
-  const v = (src as Record<string, unknown>)[key];
-  return typeof v === "string" ? v : undefined;
-}
-
 function toolName(event: AgentEvent): string | undefined {
-  return getStr(event, "toolName");
-}
-
-// Truncate a path to "{parent}/{file}" for display.
-function shortPath(p: string | undefined): string {
-  if (!p) return "";
-  const clean = p.replace(/^\/+/, "");
-  const parts = clean.split("/");
-  if (parts.length <= 2) return clean;
-  return parts.slice(-2).join("/");
+  const v = (event.metadata as { toolName?: unknown } | undefined)?.toolName;
+  return typeof v === "string" ? v : undefined;
 }
 
 // --------------------------------------------------------------------------
@@ -70,10 +67,7 @@ export const BEHAVIORS: AgentBehavior[] = [
     room: "library",
     choreo: "reading",
     matches: (e) => toolName(e) === "Read",
-    describe: (e) => {
-      const fp = getStr(e, "file_path", "input");
-      return fp ? `Reading ${shortPath(fp)}` : "Reading a file";
-    },
+    describe: (e) => describeViaToolFormat(e, "Reading a file"),
   },
 
   // ─── File writing / editing ───────────────────────────────────────────
@@ -91,15 +85,7 @@ export const BEHAVIORS: AgentBehavior[] = [
         t === "NotebookEdit"
       );
     },
-    describe: (e) => {
-      const fp =
-        getStr(e, "file_path", "input") ??
-        getStr(e, "notebook_path", "input");
-      if (!fp) return "Editing a file";
-      const t = toolName(e);
-      const verb = t === "Write" ? "Writing" : "Editing";
-      return `${verb} ${shortPath(fp)}`;
-    },
+    describe: (e) => describeViaToolFormat(e, "Editing a file"),
   },
 
   // ─── Bash / terminal ──────────────────────────────────────────────────
@@ -109,10 +95,7 @@ export const BEHAVIORS: AgentBehavior[] = [
     room: "tool_workshop",
     choreo: "hammering",
     matches: (e) => toolName(e) === "Bash",
-    describe: (e) => {
-      const cmd = getStr(e, "command", "input") ?? "";
-      return cmd ? `Running: ${cmd.slice(0, 40)}` : "Running a command";
-    },
+    describe: (e) => describeViaToolFormat(e, "Running a command"),
   },
 
   // ─── Code search (Grep / Glob) ─────────────────────────────────────────
@@ -125,11 +108,7 @@ export const BEHAVIORS: AgentBehavior[] = [
       const t = toolName(e);
       return t === "Grep" || t === "Glob";
     },
-    describe: (e) => {
-      const pat = getStr(e, "pattern", "input");
-      if (pat) return `Searching: ${pat.slice(0, 40)}`;
-      return "Searching code";
-    },
+    describe: (e) => describeViaToolFormat(e, "Searching code"),
   },
 
   // ─── Web search / fetch ───────────────────────────────────────────────
@@ -142,13 +121,7 @@ export const BEHAVIORS: AgentBehavior[] = [
       const t = toolName(e);
       return t === "WebFetch" || t === "WebSearch";
     },
-    describe: (e) => {
-      const url = getStr(e, "url", "input");
-      const q = getStr(e, "query", "input");
-      if (url) return `Fetching ${url.slice(0, 40)}`;
-      if (q) return `Searching the web: ${q.slice(0, 40)}`;
-      return "Browsing the web";
-    },
+    describe: (e) => describeViaToolFormat(e, "Browsing the web"),
   },
 
   // ─── Task / sub-agent spawn ────────────────────────────────────────────
@@ -158,12 +131,7 @@ export const BEHAVIORS: AgentBehavior[] = [
     room: "desk",
     choreo: "directing",
     matches: (e) => toolName(e) === "Task",
-    describe: (e) => {
-      const desc =
-        getStr(e, "description", "input") ??
-        getStr(e, "subagent_type", "input");
-      return desc ? `Task: ${desc.slice(0, 40)}` : "Launching sub-agent";
-    },
+    describe: (e) => describeViaToolFormat(e, "Delegating to a helper"),
   },
 
   // ─── TodoWrite / planning ─────────────────────────────────────────────

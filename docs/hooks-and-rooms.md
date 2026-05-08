@@ -92,20 +92,21 @@ desk seat instead):
 
 ---
 
-## 3. Hooks we do NOT yet consume
+## 3. Hook coverage
 
-Each row is a free real-estate signal we could surface in the world.
+Each row is a free real-estate signal — some already wired, others
+still on the backlog.
 
-| Claude hook            | Status   | Idea                                                                                            |
+| Claude hook            | Status   | Notes                                                                                           |
 | ---------------------- | -------- | ----------------------------------------------------------------------------------------------- |
-| `UserPromptSubmit`     | ignored  | The user just spoke. Walk the agent to **Reception** with a 📨 pill until the next PreToolUse.   |
-| `Notification`         | ignored  | Claude wants attention. Walk to **Reception** and ring a 🔔.                                      |
-| `PostToolUseFailure`   | collapsed into PostToolUse | Show ❌ pill for 2 s, then route to current state's room.                                |
-| `PermissionRequest`    | ignored  | Tool blocked. Stand at **Security Checkpoint** with 🚧.                                          |
-| `PreCompact`           | ignored  | Context about to shrink. Walk to **Archive** (filing cabinets) with 🗄️.                          |
+| `UserPromptSubmit`     | ✅ wired (Stage A2) | Flashes a 📨 above the agent for ~2 s and resets the idle timer so the agent doesn't drift away mid-conversation. |
+| `PostToolUseFailure`   | ✅ wired (Stage A1) | Sticky `ERROR` chip in the roster + 2 s red sprite tint + ❌ pill flash. |
+| `SubagentStop`         | ✅ wired (Stage A3) | Despawns only the helper sprite; the parent Claude session keeps running. |
+| `Notification`         | ignored  | Claude wants attention. Future home: **Reception**, ring a 🔔.                                  |
+| `PermissionRequest`    | ignored  | Tool blocked. Future home: **Security Checkpoint** with 🚧.                                     |
+| `PreCompact`           | ignored  | Context about to shrink. Future home: **Archive** (filing cabinets) with 🗄️.                   |
 | `PostCompact`          | ignored  | Compaction done. Brief "phew" pose, then resume the previous room.                              |
-| `SubagentStop`         | collapsed into Stop | Distinguish from main Stop so we can despawn ONLY the helper sprite, not the parent.            |
-| `SessionEnd`           | infers via monitor death | Listen explicitly so the walk-out can begin BEFORE the process dies.                            |
+| `SessionEnd`           | infers via monitor death | Listen explicitly so the walk-out can begin BEFORE the process dies.                |
 
 To wire a new hook, see "Where to add a new tool / hook" below.
 

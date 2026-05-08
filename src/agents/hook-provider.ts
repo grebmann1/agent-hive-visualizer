@@ -344,6 +344,7 @@ export class HookProvider implements AgentProvider {
           terminalId: presence.terminalId,
           external,
           model: presence.model,
+          provider: "claude",
         },
       });
     }
@@ -373,7 +374,10 @@ export class HookProvider implements AgentProvider {
 
       case "UserPromptSubmit":
         // Visual: user just talked to the agent. Stash as a thinking event
-        // so the roster & activity log show "User asked: ..." briefly.
+        // so the roster & activity log show "You asked: ..." briefly. The
+        // `fromUser` flag lets the scene flash a 📨 emoji on the pill so
+        // it's clear the agent just received a new prompt (otherwise the
+        // change would only show up in the rolling thinking marquee).
         api.emitEvent({
           type: "agent.thinking",
           agentId,
@@ -386,6 +390,7 @@ export class HookProvider implements AgentProvider {
           metadata: {
             text:
               typeof payload.prompt === "string" ? payload.prompt : undefined,
+            fromUser: true,
           },
         });
         return;
@@ -452,6 +457,15 @@ export class HookProvider implements AgentProvider {
           timestamp,
           metadata: {},
         });
+        return;
+      }
+
+      case "SubagentStop": {
+        // A sub-agent (Task-spawned helper Claude) just finished its
+        // delegated work. Remove its NPC so the parent can reclaim
+        // attention; the parent's own session keeps running.
+        api.removeAgent(agentId);
+        this.presence.delete(agentId);
         return;
       }
 

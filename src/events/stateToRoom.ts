@@ -60,6 +60,9 @@ export const TOOL_EMOJI: Record<string, string> = {
 export const IDLE_EMOJI = "💭";
 export const ERROR_EMOJI = "❌";
 export const COMPLETED_EMOJI = "✅";
+// Transient "user just spoke" indicator — flashed by the overhead
+// pill when a UserPromptSubmit hook arrives.
+export const PROMPT_EMOJI = "📨";
 
 // Human-readable label for an AgentState. Used wherever the raw state
 // id (e.g. "calling_tool") would otherwise leak into UI copy.

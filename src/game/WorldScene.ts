@@ -4,6 +4,7 @@ import {
   emojiForActivity,
   ERROR_EMOJI,
   IDLE_EMOJI,
+  PROMPT_EMOJI,
 } from "../events/stateToRoom";
 import { useAgentStore } from "../stores/useAgentStore";
 import { useGameStore } from "../stores/useGameStore";
@@ -141,6 +142,9 @@ interface Entity {
   // the emoji to ❌ for 800 ms then return to this baseline.
   overheadBaselineEmoji?: string;
   overheadErrorUntil?: number;
+  // Transient "user just spoke" flash — 📨 for a couple seconds when a
+  // UserPromptSubmit hook fires. Decays the same way as the error flash.
+  overheadPromptUntil?: number;
   col: number;
   row: number;
   facing: Direction;
@@ -256,7 +260,7 @@ export class WorldScene extends Phaser.Scene {
   // Cinema loop — idle NPCs head to the Cinema and sit on a seat.
   // Replaced the old wanderTick (which moved NPCs to random rooms for no
   // reason). NPCs now only move for real activity OR to/from the cinema.
-  private cinemaTimer: Phaser.Time.TimerEvent | null = null;
+  private idleSitTimer: Phaser.Time.TimerEvent | null = null;
   // Last time an NPC did something real (tool activity or summon). Used to
   // gate the cinema loop — we only send them to the cinema after a quiet
   // window, so we don't yank a just-walked NPC back.
@@ -313,11 +317,17 @@ export class WorldScene extends Phaser.Scene {
 
   /** Pick a Modern character for this NPC by id hash so the same agent
    *  always renders as the same person, but two simultaneous agents
-   *  almost always look different. */
+   *  almost always look different. The hash also folds in the agent's
+   *  provider id so two providers with the same agent id (rare but
+   *  possible during a Cursor + Claude bridge) still draw distinct
+   *  silhouettes. */
   private characterForNpc(id: string): ModernChar {
+    const dyn = useNpcStore.getState().dynamic[id];
+    const provider = dyn?.provider ?? "claude";
+    const seed = `${provider}:${id}`;
     let h = 0;
-    for (let i = 0; i < id.length; i++) {
-      h = ((h << 5) - h + id.charCodeAt(i)) | 0;
+    for (let i = 0; i < seed.length; i++) {
+      h = ((h << 5) - h + seed.charCodeAt(i)) | 0;
     }
     return MODERN_CHARS[Math.abs(h) % MODERN_CHARS.length];
   }
@@ -384,7 +394,7 @@ export class WorldScene extends Phaser.Scene {
     // the LOADER_COMPLETE event.
     const bundle = await loadInteriorZone();
     this.zone = bundle.zone;
-    // Cache the authored seat cells so claimFreeSeat / cinemaTick / the
+    // Cache the authored seat cells so claimFreeSeat / tickIdleSit / the
     // post-spawn flow can look them up without re-reading the manifest.
     this.seatCells = bundle.parsed.seatCells.slice();
     // Snapshot the raw Tiled objects so the debug overlay can outline
@@ -442,7 +452,7 @@ export class WorldScene extends Phaser.Scene {
     this.createNpcs();
     this.setupMouseInput();
     this.subscribeStores();
-    this.startCinemaLoop();
+    this.startIdleSitLoop();
 
     // Tether rendering layer — sits under sprites so it doesn't obscure them.
     this.tetherGfx = this.add.graphics().setDepth(950);
@@ -494,8 +504,8 @@ export class WorldScene extends Phaser.Scene {
       this.unsubDialogActive?.();
       this.unsubscribeAgents = null;
       this.unsubscribeGame = null;
-      this.cinemaTimer?.destroy();
-      this.cinemaTimer = null;
+      this.idleSitTimer?.destroy();
+      this.idleSitTimer = null;
       // Clear all scene-local state. scene.restart() reuses the same
       // instance so class-field maps persist across restarts — an old
       // walk path targeting a now-destroyed sprite crashes tickNpcPaths.
@@ -520,16 +530,16 @@ export class WorldScene extends Phaser.Scene {
   // cinema loop and the post-spawn assignment both walk this list.
   private seatCells: SeatCell[] = [];
 
-  private startCinemaLoop() {
+  private startIdleSitLoop() {
     if (this.zone.id !== "interior") return;
-    this.cinemaTimer = this.time.addEvent({
+    this.idleSitTimer = this.time.addEvent({
       delay: 2000,
       loop: true,
-      callback: () => this.cinemaTick(),
+      callback: () => this.tickIdleSit(),
     });
   }
 
-  private cinemaTick() {
+  private tickIdleSit() {
     if (useGameStore.getState().dialog.active) return;
     const now = this.time.now;
     // An NPC is "idle" if it hasn't had a real activity / summon / dialog
@@ -724,9 +734,56 @@ export class WorldScene extends Phaser.Scene {
     return isWalkableIn(this.zone, col, row);
   }
 
+  // Empty-state hints — one Phaser Text per room, painted at the room's
+  // anchor cell. Only drawn while no dynamic NPC is present so they
+  // don't compete with sprites once activity starts. Built once at
+  // create() and shown/hidden in tickEmptyStateHints().
+  private emptyStateLabels: Phaser.GameObjects.Text[] = [];
+
   private drawRoomLabels() {
-    // Room labels are rendered in the React HUD overlay, not inside the canvas.
-    // In-canvas tiny pixel text is unreadable at most zoom levels.
+    // Build the empty-state labels. They start hidden; the per-frame
+    // tickEmptyStateHints toggles visibility based on dynamic-NPC count.
+    if (this.emptyStateLabels.length > 0) {
+      for (const t of this.emptyStateLabels) t.destroy();
+      this.emptyStateLabels = [];
+    }
+    const regions = getRoomRegions();
+    for (const r of regions) {
+      const room = roomById(r.id);
+      if (!room) continue;
+      const cx = ((r.colMin + r.colMax + 1) / 2) * TILE_SIZE;
+      const cy = ((r.rowMin + r.rowMax + 1) / 2) * TILE_SIZE;
+      const t = this.add
+        .text(cx, cy, room.label.toUpperCase(), {
+          fontFamily: '"Press Start 2P", monospace',
+          fontSize: "9px",
+          color: "#6ee7b7",
+          backgroundColor: "#0e1018",
+          padding: { x: 6, y: 3 },
+          resolution: 3,
+        })
+        .setOrigin(0.5, 0.5)
+        .setDepth(800)
+        .setAlpha(0);
+      this.emptyStateLabels.push(t);
+    }
+  }
+
+  /** Fade the empty-state room labels in/out based on whether any
+   *  dynamic agent is present. Cheap — runs each frame but only writes
+   *  alpha when it actually changes. */
+  private tickEmptyStateHints() {
+    if (this.emptyStateLabels.length === 0) return;
+    const dyn = useNpcStore.getState().dynamic;
+    const hasAgents = Object.keys(dyn).length > 0;
+    const targetAlpha = hasAgents ? 0 : 0.85;
+    for (const t of this.emptyStateLabels) {
+      if (Math.abs(t.alpha - targetAlpha) < 0.02) continue;
+      // Smooth fade over a few frames — avoids the "popping" that an
+      // instant-set produces when an agent walks in.
+      const next = t.alpha + (targetAlpha - t.alpha) * 0.15;
+      t.setAlpha(next);
+    }
   }
 
   // --------------------------------------------------------------------
@@ -1069,6 +1126,18 @@ export class WorldScene extends Phaser.Scene {
     const npc = this.npcs.get(id);
     if (!npc) return;
 
+    // Master-hive guard: a sub-agent under a `claude-master` parent
+    // outlives any single Task tool_use. Skip removal as long as the
+    // parent is still in the scene; the master-hive provider issues
+    // its own explicit removal when the team disperses.
+    const parentId = (npc.def as { parentId?: string }).parentId;
+    if (parentId) {
+      const parent = useNpcStore.getState().dynamic[parentId];
+      if (parent?.provider === "claude-master") {
+        return;
+      }
+    }
+
     // Tear down any active choreo + helper first so their tweens/timers
     // don't operate on a destroyed sprite.
     this.stopChoreoFor(npc);
@@ -1201,12 +1270,16 @@ export class WorldScene extends Phaser.Scene {
     const emoji = npc.overheadEmojiText;
     if (!code || !emoji) return;
 
+    const now = this.time.now;
     const showError =
-      npc.overheadErrorUntil !== undefined &&
-      this.time.now < npc.overheadErrorUntil;
+      npc.overheadErrorUntil !== undefined && now < npc.overheadErrorUntil;
+    const showPrompt =
+      npc.overheadPromptUntil !== undefined && now < npc.overheadPromptUntil;
     const activeEmoji = showError
       ? ERROR_EMOJI
-      : npc.overheadBaselineEmoji ?? IDLE_EMOJI;
+      : showPrompt
+        ? PROMPT_EMOJI
+        : npc.overheadBaselineEmoji ?? IDLE_EMOJI;
     emoji.setText(activeEmoji);
 
     const bg = npc.overheadBg;
@@ -1405,6 +1478,16 @@ export class WorldScene extends Phaser.Scene {
           Boolean(
             (act.event.metadata as { isError?: boolean } | undefined)?.isError,
           );
+        // UserPromptSubmit comes through as an `agent.thinking` event with
+        // `fromUser: true`. Flash the 📨 indicator above the agent so it's
+        // obvious the user just spoke, even if the rolling thinking
+        // marquee hasn't redrawn yet.
+        const fromUser = Boolean(
+          (act.event.metadata as { fromUser?: boolean } | undefined)?.fromUser,
+        );
+        if (fromUser) {
+          npc.overheadPromptUntil = this.time.now + 2400;
+        }
         this.updateOverheadPill(agentId, toolName, act.event.state, isError);
 
         // The behavior registry (src/game/behaviors.ts) has already resolved
@@ -1488,11 +1571,62 @@ export class WorldScene extends Phaser.Scene {
     this.tickNpcPaths();
     this.tickChoreoDecay();
     this.tickFollowCamera();
+    this.tickSpriteSeparation();
+    this.tickEmptyStateHints();
     this.tickOverheadPills();
     this.tickTransitBadges();
     this.tickThinkingBadges();
     this.drawTethers();
     this.drawDebugOverlay();
+  }
+
+  /** Visual-only push-apart so two NPCs whose sprites end up overlapping
+   *  drift a few pixels in opposite directions instead of blending into
+   *  a single silhouette. We do NOT touch npc.col/npc.row — the
+   *  pathfinder still treats them as occupying their authored cell. */
+  private tickSpriteSeparation() {
+    const SEPARATION_RADIUS = 18; // smaller than a tile (32) on purpose
+    const PUSH_PER_FRAME = 0.6;
+    const MAX_OFFSET = 14;
+    for (const [aId, a] of this.npcs) {
+      if (!a.sprite || !a.sprite.scene) continue;
+      // Skip mid-step tweens (the walk owns the position) and seated
+      // agents (they occupy a fixed pixel offset on the chair).
+      if (a.tween) continue;
+      if (this.seatByNpc.has(aId)) continue;
+      let dx = 0;
+      let dy = 0;
+      for (const [bId, b] of this.npcs) {
+        if (bId === aId) continue;
+        if (!b.sprite || !b.sprite.scene) continue;
+        const distX = a.sprite.x - b.sprite.x;
+        const distY = a.sprite.y - b.sprite.y;
+        const dist = Math.hypot(distX, distY) || 0.0001;
+        if (dist >= SEPARATION_RADIUS) continue;
+        // Symmetric push proportional to overlap.
+        const overlap = (SEPARATION_RADIUS - dist) / SEPARATION_RADIUS;
+        dx += (distX / dist) * overlap;
+        dy += (distY / dist) * overlap;
+      }
+      if (dx === 0 && dy === 0) continue;
+      // Cap the per-frame nudge so two clustered agents don't pop apart
+      // explosively — we want a subtle "make room" motion.
+      const mag = Math.hypot(dx, dy) || 1;
+      const stepX = (dx / mag) * PUSH_PER_FRAME;
+      const stepY = (dy / mag) * PUSH_PER_FRAME;
+      // Cap total drift from the canonical tile center so a sprite
+      // never reads as being in a different tile than npc.col/npc.row.
+      const centerX = a.col * TILE_SIZE + TILE_SIZE / 2;
+      const centerY = a.row * TILE_SIZE + TILE_SIZE / 2;
+      const offX = a.sprite.x + stepX - centerX;
+      const offY = a.sprite.y + stepY - centerY;
+      const offMag = Math.hypot(offX, offY);
+      const scale = offMag > MAX_OFFSET ? MAX_OFFSET / offMag : 1;
+      const nextX = centerX + offX * scale;
+      const nextY = centerY + offY * scale;
+      a.sprite.setPosition(nextX, nextY);
+      a.shadow.setPosition(nextX, nextY + 7);
+    }
   }
 
   /**
@@ -1563,6 +1697,13 @@ export class WorldScene extends Phaser.Scene {
         this.time.now >= npc.overheadErrorUntil
       ) {
         npc.overheadErrorUntil = undefined;
+        this.renderPill(id);
+      }
+      if (
+        npc.overheadPromptUntil !== undefined &&
+        this.time.now >= npc.overheadPromptUntil
+      ) {
+        npc.overheadPromptUntil = undefined;
         this.renderPill(id);
       }
     }

@@ -198,24 +198,57 @@ function renderRow(
               TALKING
             </span>
           )}
-          {isExternal ? (
-            <span
-              className="pixel-font text-[8px] px-1.5 py-0.5 rounded"
-              style={{ background: "#2a3150", color: "#8e94bf" }}
-              title="Detected external session (not launched from Agent Force HQ)"
-            >
-              EXTERNAL
-            </span>
-          ) : (
-            isDynamic && (
-              <span
-                className="pixel-font text-[8px] px-1.5 py-0.5 rounded"
-                style={{ background: "#c9a959", color: "#1b1e2b" }}
-              >
-                LIVE
-              </span>
-            )
-          )}
+          {(() => {
+            // Per-provider chip — `provider` is the new field; fall back to
+            // the legacy `external` boolean for npcs that haven't been
+            // upserted with a provider yet (post-migration safety).
+            const dyn = isDynamic ? (n as DynamicNpc) : null;
+            const provider = dyn?.provider ?? "claude";
+            if (provider === "cursor") {
+              return (
+                <span
+                  className="pixel-font text-[8px] px-1.5 py-0.5 rounded"
+                  style={{ background: "#5b3a7c", color: "#fff" }}
+                  title="Cursor agent"
+                >
+                  CURSOR
+                </span>
+              );
+            }
+            if (provider === "claude-master") {
+              return (
+                <span
+                  className="pixel-font text-[8px] px-1.5 py-0.5 rounded"
+                  style={{ background: "#22c55e", color: "#0e1018" }}
+                  title="Master Claude (orchestrator)"
+                >
+                  MASTER
+                </span>
+              );
+            }
+            if (isExternal) {
+              return (
+                <span
+                  className="pixel-font text-[8px] px-1.5 py-0.5 rounded"
+                  style={{ background: "#2a3150", color: "#8e94bf" }}
+                  title="Detected external session (not launched from Agent Force HQ)"
+                >
+                  EXTERNAL
+                </span>
+              );
+            }
+            if (isDynamic) {
+              return (
+                <span
+                  className="pixel-font text-[8px] px-1.5 py-0.5 rounded"
+                  style={{ background: "#c9a959", color: "#1b1e2b" }}
+                >
+                  LIVE
+                </span>
+              );
+            }
+            return null;
+          })()}
           {hasChildren && (
             <span
               className="pixel-font text-[8px] px-1.5 py-0.5 rounded"
