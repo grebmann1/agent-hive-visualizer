@@ -28,6 +28,7 @@ import {
   type ZoneDef,
 } from "./zones";
 import { resolveGid, type SeatCell } from "./tiled-loader";
+import { download as downloadAgentLog, logAgent, size as agentLogSize } from "./agentLog";
 import {
   type ChoreoHandle,
   type ChoreoKind,
@@ -474,6 +475,18 @@ export class WorldScene extends Phaser.Scene {
       this.debugGfx?.setVisible(this.debugVisible);
     });
 
+    // Shift+E downloads the in-memory agent motion log as JSON.
+    // Used to diagnose teleport reports — the log captures every
+    // pixel/tile change so we can detect Δpx > TILE between
+    // consecutive entries for the same agent.
+    this.input.keyboard?.on("keydown-E", (e: KeyboardEvent) => {
+      if (!e.shiftKey) return;
+      const t = e.target as HTMLElement | null;
+      if (t?.tagName === "INPUT" || t?.tagName === "TEXTAREA") return;
+      console.info(`[agentLog] downloading ${agentLogSize()} entries`);
+      downloadAgentLog();
+    });
+
     // Center + fit the map to the current viewport. We use the LARGER
     // of width-fit / height-fit ratios so the map COVERS the canvas
     // (no chrome bleed-through) — accepts a small crop on whichever
@@ -699,6 +712,13 @@ export class WorldScene extends Phaser.Scene {
     if (npc?.sprite?.scene && npc.sprite.texture.key !== npc.animKey) {
       try {
         npc.sprite.setTexture(npc.animKey, FRAME[npc.facing][0]);
+        logAgent({
+          ts: Date.now(),
+          scene: this.time.now,
+          agentId: npcId,
+          kind: "texture-swap",
+          note: `seat → run (${npc.animKey})`,
+        });
       } catch {
         // ignore
       }
@@ -791,6 +811,8 @@ export class WorldScene extends Phaser.Scene {
       // Already there. Apply offset directly so a re-claim of the same
       // tile still snaps the sprite onto the chair.
       if (finalOffset) {
+        const fromX = npc.sprite.x;
+        const fromY = npc.sprite.y;
         npc.sprite.setPosition(finalOffset.px, finalOffset.py);
         npc.shadow.setPosition(finalOffset.px, finalOffset.py + 7);
         npc.facing = "down";
@@ -800,6 +822,17 @@ export class WorldScene extends Phaser.Scene {
         } catch {
           // ignore
         }
+        logAgent({
+          ts: Date.now(),
+          scene: this.time.now,
+          agentId: npcId,
+          kind: "seat-snap",
+          fromX,
+          fromY,
+          toX: finalOffset.px,
+          toY: finalOffset.py,
+          note: "already-at-cell offset apply",
+        });
       }
       return;
     }
@@ -1168,6 +1201,18 @@ export class WorldScene extends Phaser.Scene {
     // the entry is in the map so renderPill can reach it by id.
     this.renderPill(def.id);
 
+    logAgent({
+      ts: Date.now(),
+      scene: this.time.now,
+      agentId: def.id,
+      kind: "spawn",
+      toCol: col,
+      toRow: row,
+      toX: px,
+      toY: py,
+      note: isSubAgent ? `sub-agent of ${parentId ?? "?"}` : undefined,
+    });
+
     // Sub-agent appearance: flash the tether to the parent so the
     // delegation reads as an explicit handoff rather than a random
     // sprite popping in.
@@ -1249,6 +1294,16 @@ export class WorldScene extends Phaser.Scene {
   removeNpcEntity(id: string) {
     const npc = this.npcs.get(id);
     if (!npc) return;
+    logAgent({
+      ts: Date.now(),
+      scene: this.time.now,
+      agentId: id,
+      kind: "remove",
+      fromCol: npc.col,
+      fromRow: npc.row,
+      fromX: npc.sprite.x,
+      fromY: npc.sprite.y,
+    });
 
     // Master-hive guard: a sub-agent under a `claude-master` parent
     // outlives any single Task tool_use. Skip removal as long as the
@@ -1766,8 +1821,25 @@ export class WorldScene extends Phaser.Scene {
       }
       const nextX = centerX + offX;
       const nextY = centerY + offY;
+      const sepFromX = a.sprite.x;
+      const sepFromY = a.sprite.y;
       a.sprite.setPosition(nextX, nextY);
       a.shadow.setPosition(nextX, nextY + 7);
+      // Only log meaningful nudges so we don't spam the buffer at
+      // 60 fps with sub-pixel jitter.
+      const dPx = Math.hypot(nextX - sepFromX, nextY - sepFromY);
+      if (dPx > 0.1) {
+        logAgent({
+          ts: Date.now(),
+          scene: this.time.now,
+          agentId: aId,
+          kind: "separation",
+          fromX: sepFromX,
+          fromY: sepFromY,
+          toX: nextX,
+          toY: nextY,
+        });
+      }
     }
   }
 
@@ -2076,6 +2148,17 @@ export class WorldScene extends Phaser.Scene {
     const npc = this.npcs.get(npcId);
     if (!npc) return;
     const anchor = ROOM_ANCHORS[room];
+    logAgent({
+      ts: Date.now(),
+      scene: this.time.now,
+      agentId: npcId,
+      kind: "summon",
+      fromCol: npc.col,
+      fromRow: npc.row,
+      toCol: anchor.col,
+      toRow: anchor.row,
+      note: `route to room=${room}`,
+    });
 
     // Find a free tile near the anchor — anchor itself or adjacent
     let target = { col: anchor.col, row: anchor.row };
@@ -2170,6 +2253,17 @@ export class WorldScene extends Phaser.Scene {
       // Path could have become invalid if the player stepped into it — retry later
       if (this.isEntityAt(next.col, next.row, id)) {
         path.unshift(next);
+        logAgent({
+          ts: Date.now(),
+          scene: this.time.now,
+          agentId: id,
+          kind: "walk-step-skip",
+          fromCol: npc.col,
+          fromRow: npc.row,
+          toCol: next.col,
+          toRow: next.row,
+          note: "tile occupied; will retry",
+        });
         continue;
       }
       const dc = next.col - npc.col;
@@ -2187,6 +2281,25 @@ export class WorldScene extends Phaser.Scene {
       const targetY = offset
         ? offset.py
         : next.row * TILE_SIZE + TILE_SIZE / 2;
+      const stepFromX = npc.sprite.x;
+      const stepFromY = npc.sprite.y;
+      const stepFromCol = npc.col;
+      const stepFromRow = npc.row;
+      logAgent({
+        ts: Date.now(),
+        scene: this.time.now,
+        agentId: id,
+        kind: "walk-step-start",
+        fromCol: stepFromCol,
+        fromRow: stepFromRow,
+        toCol: next.col,
+        toRow: next.row,
+        fromX: stepFromX,
+        fromY: stepFromY,
+        toX: targetX,
+        toY: targetY,
+        note: offset ? `seat-offset px=(${offset.px},${offset.py})` : undefined,
+      });
       npc.tween = this.tweens.add({
         targets: npc.sprite,
         x: targetX,
@@ -2198,6 +2311,18 @@ export class WorldScene extends Phaser.Scene {
           npc.row = next.row;
           npc.sprite.setDepth(1000 + next.row);
           npc.tween = undefined;
+          logAgent({
+            ts: Date.now(),
+            scene: this.time.now,
+            agentId: id,
+            kind: "walk-step-end",
+            fromCol: stepFromCol,
+            fromRow: stepFromRow,
+            toCol: next.col,
+            toRow: next.row,
+            toX: npc.sprite.x,
+            toY: npc.sprite.y,
+          });
           if (offset) {
             // Force facing toward camera so seated agents look out at
             // the player rather than wherever the last step came from.

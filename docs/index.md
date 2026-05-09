@@ -12,6 +12,9 @@ Pick where to start:
   and how to uninstall.
 - **[Build the installer](build-installer.md)** — produce a signed
   DMG locally; how to notarize for distribution.
+- **[Debug teleporting agents](debug-teleport.md)** — capture the
+  in-app motion log (Shift+E) and use it to find rogue
+  position writes when an NPC appears to jump across the canvas.
 - **[How it works](architecture.md)** — the full pipeline from a
   Claude hook to a sprite walking on the map. Render layers, visual
   vocabulary (pill emojis, badges, tethers, time-of-day tint), the

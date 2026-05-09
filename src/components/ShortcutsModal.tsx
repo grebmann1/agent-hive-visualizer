@@ -19,6 +19,7 @@ const SHORTCUTS: Array<{ keys: string; label: string }> = [
   { keys: "⌘`", label: "Switch focus between game and terminal" },
   { keys: "L", label: "Toggle event log in sidebar" },
   { keys: "D", label: "Toggle debug overlay (object borders + agent anchors)" },
+  { keys: "Shift+E", label: "Export agent motion log (JSON download — for teleport debugging)" },
   { keys: "?", label: "Show this shortcut list" },
 ];
 
