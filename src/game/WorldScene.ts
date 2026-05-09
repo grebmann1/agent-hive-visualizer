@@ -961,8 +961,8 @@ export class WorldScene extends Phaser.Scene {
     // spawn at their home anchor.
     let col = def.col;
     let row = def.row;
-    let targetCol = def.col;
-    let targetRow = def.row;
+    const targetCol = def.col;
+    const targetRow = def.row;
     const isDynamic = Boolean(
       (def as { dynamic?: boolean }).dynamic,
     );

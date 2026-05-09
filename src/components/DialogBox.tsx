@@ -1,6 +1,12 @@
 "use client";
 
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent,
+} from "react";
 import { npcById } from "../game/npcs";
 import { useAgentStore } from "../stores/useAgentStore";
 import { useGameStore, type DialogLine } from "../stores/useGameStore";
@@ -209,6 +215,25 @@ export default function DialogBox() {
     setAwaitingInput,
   ]);
 
+  const cancelInFlight = useCallback(() => {
+    const h = askHandleRef.current;
+    if (h) {
+      try {
+        h.cancel();
+      } catch {
+        /* ignore */
+      }
+      try {
+        h.dispose();
+      } catch {
+        /* ignore */
+      }
+      askHandleRef.current = null;
+    }
+    finishStreamingLine();
+    setThinking(false);
+  }, [finishStreamingLine, setThinking]);
+
   useEffect(() => {
     if (!dialog.active) return;
     const onKey = (e: globalThis.KeyboardEvent) => {
@@ -252,28 +277,10 @@ export default function DialogBox() {
     done,
     shiftLine,
     closeDialog,
+    cancelInFlight,
     isCurrentStreaming,
     isStreamingActive,
   ]);
-
-  const cancelInFlight = () => {
-    const h = askHandleRef.current;
-    if (h) {
-      try {
-        h.cancel();
-      } catch {
-        /* ignore */
-      }
-      try {
-        h.dispose();
-      } catch {
-        /* ignore */
-      }
-      askHandleRef.current = null;
-    }
-    finishStreamingLine();
-    setThinking(false);
-  };
 
   if (!dialog.active) return null;
 
