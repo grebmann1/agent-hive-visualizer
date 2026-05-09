@@ -28,6 +28,8 @@ export default function DialogBox() {
   const closeDialog = useGameStore((s) => s.closeDialog);
   const setAwaitingInput = useGameStore((s) => s.setAwaitingInput);
   const setThinking = useGameStore((s) => s.setThinking);
+  const appendDialogTurn = useGameStore((s) => s.appendDialogTurn);
+  const dialogHistoryByNpc = useGameStore((s) => s.dialogHistoryByNpc);
   const pushAgentEvent = useAgentStore((s) => s.pushEvent);
   // Subscribe reactively so the one-line header strip updates when the
   // transcript watcher posts the `agent.session` (model/sessionId) event.
@@ -104,18 +106,37 @@ export default function DialogBox() {
   }, [currentLine?.id, isCurrentStreaming, isStreamingActive, currentLine]);
 
   useEffect(() => {
-    if (dialog.active) {
-      conversationRef.current = [];
-      setInput("");
-    }
+    if (!dialog.active) return;
+    setInput("");
+    // Restore prior turns from the persisted history so multi-turn
+    // context survives dialog close + reopen.
+    const history = dialog.npcId
+      ? (dialogHistoryByNpc[dialog.npcId] ?? [])
+      : [];
+    conversationRef.current = history.map((t) => ({
+      role: t.role,
+      content: t.content,
+    }));
+    // Intentionally only seeds when the dialog is (re)opened — the
+    // store-derived hash above changes when the user sends a new turn,
+    // and we don't want to reset the local ref mid-conversation.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dialog.active, dialog.npcId]);
 
-  // Pin scroll to the bottom whenever the visible line grows so long
-  // streaming replies stay readable instead of disappearing past the
-  // dialog's max-height.
-  useEffect(() => {
+  // Sticky-bottom auto-scroll. We keep `revealed` pinned to the
+  // bottom of the dialog only while the user is already near the
+  // bottom — if they scrolled up to read, we leave them there and
+  // re-engage the moment they scroll back to the bottom.
+  const stickyRef = useRef(true);
+  const onLineScroll = () => {
     const el = lineScrollRef.current;
     if (!el) return;
+    stickyRef.current =
+      el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+  };
+  useEffect(() => {
+    const el = lineScrollRef.current;
+    if (!el || !stickyRef.current) return;
     el.scrollTop = el.scrollHeight;
   }, [revealed]);
 
@@ -357,6 +378,9 @@ export default function DialogBox() {
               appendToStreamingLine(event.delta);
               accumulatedForHistory += event.delta;
             }
+            // Once Claude starts speaking, the previous tool's status
+            // chip has served its purpose — fade it out.
+            setToolStatus(null);
             return;
           }
           if (event.type === "tool_use") {
@@ -393,6 +417,7 @@ export default function DialogBox() {
               role: "assistant",
               content: finalText,
             });
+            appendDialogTurn(dyn.id, { role: "assistant", content: finalText });
             finish();
             return;
           }
@@ -432,6 +457,9 @@ export default function DialogBox() {
     setAwaitingInput(false);
     enqueueLine({ source: "player", text });
     conversationRef.current.push({ role: "user", content: text });
+    if (dialog.npcId) {
+      appendDialogTurn(dialog.npcId, { role: "user", content: text });
+    }
 
     setThinking(true);
 
@@ -495,6 +523,9 @@ export default function DialogBox() {
         enqueueLine({ source: "npc", speaker: npc.name, text: page });
       }
       conversationRef.current.push({ role: "assistant", content: reply });
+      if (dialog.npcId) {
+        appendDialogTurn(dialog.npcId, { role: "assistant", content: reply });
+      }
     } catch (err) {
       enqueueLine({
         source: "system",
@@ -591,6 +622,7 @@ export default function DialogBox() {
         ) : (
         <div
           ref={lineScrollRef}
+          onScroll={onLineScroll}
           className="min-h-[88px] max-h-[260px] overflow-y-auto pixel-scroll text-[15px] leading-[1.6] text-ink"
         >
           {line ? (

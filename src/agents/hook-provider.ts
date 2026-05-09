@@ -16,6 +16,7 @@
 // path, so we idle-timeout agents after ~10 min of silence.
 
 import type { AgentEvent } from "../events/types";
+import { useNpcStore } from "../stores/useNpcStore";
 import type {
   AgentProvider,
   AgentProviderAPI,
@@ -246,12 +247,16 @@ export class HookProvider implements AgentProvider {
   private apiRef: AgentProviderAPI | null = null;
   // Active `claude -p` subprocesses keyed by agent id, for ask() routing.
   private pendingAsks = new Map<string, AskHandle>();
-  // Most recent Task tool_use per parent agent. When a brand-new
-  // session_id arrives within TASK_SPAWN_WINDOW_MS we tether it to the
-  // most recently-firing parent so the spawned helper renders nested
-  // under its caller (Claude's hook payload doesn't carry a
-  // parent_session_id, so this is our best-effort linker).
-  private recentTaskByParent = new Map<string, number>();
+  // FIFO of unconsumed `Task` PreToolUse entries per parent agent.
+  // Each entry carries the timestamp + the `subagent_type` from the
+  // tool input so the renderer can label the helper appropriately
+  // (RESEARCHER, TESTER, …). Storing a queue (not a single entry) is
+  // what lets parallel Tasks fire N sub-agents in one turn without
+  // all of them collapsing under the most-recent Task.
+  private recentTaskByParent = new Map<
+    string,
+    Array<{ at: number; subagentType?: string }>
+  >();
 
   start(api: AgentProviderAPI): () => void {
     this.apiRef = api;
@@ -348,9 +353,9 @@ export class HookProvider implements AgentProvider {
       // Best-effort parent inference: if a known agent fired a `Task`
       // PreToolUse in the last TASK_SPAWN_WINDOW_MS, the brand-new
       // session showing up now is almost certainly the spawned helper.
-      // Pick the most recent open Task (Claude only spawns one Task
-      // per turn) and tether the child to it.
-      const parentId = this.findRecentTaskParent(now);
+      // consumeRecentTaskParent() pops one queued entry from the
+      // chosen parent so parallel Tasks each get their own child.
+      const link = this.consumeRecentTaskParent(now);
       api.upsertAgent({
         id: agentId,
         displayName: prettyName(agentId, presence.sessionId),
@@ -362,12 +367,10 @@ export class HookProvider implements AgentProvider {
           external,
           model: presence.model,
           provider: "claude",
-          parentId,
+          parentId: link?.parentId,
+          subagentType: link?.subagentType,
         },
       });
-      // Once consumed, clear the slot so a subsequent unrelated
-      // session join doesn't accidentally reuse the same parent.
-      if (parentId) this.recentTaskByParent.delete(parentId);
     }
 
     const timestamp = new Date(now).toISOString();
@@ -417,10 +420,16 @@ export class HookProvider implements AgentProvider {
         return;
 
       case "PreToolUse": {
-        // If this parent just kicked off a Task, remember it so the
-        // helper session that arrives in the next ~60s is tethered.
+        // If this parent just kicked off a Task, push the timestamp
+        // onto the per-parent queue. Each entry will be popped by
+        // exactly one new sub-agent session within the spawn window,
+        // so parallel Tasks each get their own child. We also stash
+        // the `subagent_type` so the renderer can label the helper.
         if (payload.tool_name === "Task") {
-          this.recentTaskByParent.set(agentId, now);
+          const subagentType = pickString(payload.tool_input, "subagent_type");
+          const queue = this.recentTaskByParent.get(agentId) ?? [];
+          queue.push({ at: now, subagentType });
+          this.recentTaskByParent.set(agentId, queue);
         }
         const state = toolToState(payload.tool_name);
         const file =
@@ -488,8 +497,31 @@ export class HookProvider implements AgentProvider {
 
       case "SubagentStop": {
         // A sub-agent (Task-spawned helper Claude) just finished its
-        // delegated work. Remove its NPC so the parent can reclaim
-        // attention; the parent's own session keeps running.
+        // delegated work. Surface a "subagent completed" event on the
+        // PARENT's stream so the activity modal shows the handoff,
+        // then remove the sub-agent's NPC. The parent's own session
+        // keeps running.
+        const child = useNpcStore.getState().dynamic[agentId];
+        const parentNpcId = (child as { parentId?: string } | undefined)
+          ?.parentId;
+        if (parentNpcId) {
+          const summary =
+            typeof payload.prompt === "string" && payload.prompt.length > 0
+              ? payload.prompt.slice(0, 200)
+              : undefined;
+          api.emitEvent({
+            type: "agent.subagent.completed",
+            agentId: parentNpcId,
+            message: summary
+              ? `Sub-agent finished: ${summary}`
+              : "Sub-agent finished.",
+            timestamp,
+            metadata: {
+              childAgentId: agentId,
+              summary,
+            },
+          });
+        }
         api.removeAgent(agentId);
         this.presence.delete(agentId);
         return;
@@ -512,27 +544,40 @@ export class HookProvider implements AgentProvider {
     // Drop stale Task entries — if no helper showed up within the
     // window, the Task probably ran without a sub-agent (e.g. a Task
     // tool that doesn't actually spawn one).
-    for (const [parentId, ts] of this.recentTaskByParent) {
-      if (now - ts > TASK_SPAWN_WINDOW_MS) {
+    for (const [parentId, queue] of this.recentTaskByParent) {
+      const fresh = queue.filter((e) => now - e.at <= TASK_SPAWN_WINDOW_MS);
+      if (fresh.length === 0) {
         this.recentTaskByParent.delete(parentId);
+      } else if (fresh.length !== queue.length) {
+        this.recentTaskByParent.set(parentId, fresh);
       }
     }
   }
 
-  /** Return the agentId of the most recently-firing parent that opened
-   *  a `Task` tool_use in the last TASK_SPAWN_WINDOW_MS. Used by the
-   *  upsert flow to tether a brand-new session to its caller. */
-  private findRecentTaskParent(now: number): string | undefined {
+  /** Pop one queued `Task` PreToolUse entry from the parent that most
+   *  likely just spawned this brand-new session. Skips parents that
+   *  have already left the world (their session ended before the
+   *  helper hook arrived) so we don't draw a tether to nobody. */
+  private consumeRecentTaskParent(
+    now: number,
+  ): { parentId: string; subagentType?: string } | undefined {
     let bestId: string | undefined;
     let bestTs = 0;
-    for (const [parentId, ts] of this.recentTaskByParent) {
-      if (now - ts > TASK_SPAWN_WINDOW_MS) continue;
-      if (ts > bestTs) {
-        bestTs = ts;
+    for (const [parentId, queue] of this.recentTaskByParent) {
+      if (!this.presence.has(parentId)) continue;
+      const oldest = queue[0];
+      if (!oldest) continue;
+      if (now - oldest.at > TASK_SPAWN_WINDOW_MS) continue;
+      if (oldest.at > bestTs) {
+        bestTs = oldest.at;
         bestId = parentId;
       }
     }
-    return bestId;
+    if (!bestId) return undefined;
+    const queue = this.recentTaskByParent.get(bestId)!;
+    const entry = queue.shift();
+    if (queue.length === 0) this.recentTaskByParent.delete(bestId);
+    return { parentId: bestId, subagentType: entry?.subagentType };
   }
 
   /**

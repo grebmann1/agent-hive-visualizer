@@ -269,19 +269,28 @@ export default function ActivityModal() {
           >
             {entries.map((e, i) => {
               const when = formatTime(e.timestamp);
-              const label = e.state
-                ? formatState(e.state as AgentState)
-                : e.type.replace(/^agent\./, "");
+              const isSubagentDone = e.type === "agent.subagent.completed";
+              const label = isSubagentDone
+                ? "Sub-agent done"
+                : e.state
+                  ? formatState(e.state as AgentState)
+                  : e.type.replace(/^agent\./, "");
               const meta = (e.metadata ?? {}) as EventMeta;
               const isResult = e.type === "agent.tool.result";
               const isError = isResult && meta.isError;
               const isThinking = e.type === "agent.thinking";
               const borderColor = isError
                 ? "#ef4444"
-                : isResult
+                : isResult || isSubagentDone
                   ? "#22c55e"
                   : undefined;
-              const marker = isError ? "✕" : isResult ? "✓" : null;
+              const marker = isError
+                ? "✕"
+                : isSubagentDone
+                  ? "🤝"
+                  : isResult
+                    ? "✓"
+                    : null;
 
               // Resolve tool name for this row: prefer meta.toolName; for
               // tool_result, look up via toolUseId.

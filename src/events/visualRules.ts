@@ -103,5 +103,17 @@ export function eventToVisualAction(event: AgentEvent): VisualAction {
         face: "🙂",
       };
     }
+
+    case "agent.subagent.completed": {
+      // Parent's view of "my helper finished". Keep the parent at the
+      // desk with a satisfied face — the renderer's behavior registry
+      // is the canonical router; this shim just keeps callers happy.
+      return {
+        room: "desk",
+        animation: "idle",
+        bubble: event.message || "Sub-agent finished",
+        face: "🤝",
+      };
+    }
   }
 }

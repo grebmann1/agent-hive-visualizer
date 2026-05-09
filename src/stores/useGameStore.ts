@@ -28,6 +28,11 @@ export interface DialogState {
   toolStatus: string | null;
 }
 
+export interface DialogTurn {
+  role: "user" | "assistant";
+  content: string;
+}
+
 interface GameStoreState {
   // When set, WorldScene's camera centers on this NPC each frame. Manual
   // pan (wheel/drag) clears it. Driven by the ContextMenu's Follow item.
@@ -35,6 +40,11 @@ interface GameStoreState {
 
   // Dialog box state
   dialog: DialogState;
+
+  // Persisted chat history per NPC — restored when the user reopens
+  // the dialog for the same agent. Bounded to ~20 turns to keep the
+  // store light.
+  dialogHistoryByNpc: Record<string, DialogTurn[]>;
 
   // actions
   setFollowNpc: (id: string | null) => void;
@@ -52,12 +62,16 @@ interface GameStoreState {
   appendToStreamingLine: (text: string) => void;
   finishStreamingLine: () => void;
   setToolStatus: (s: string | null) => void;
+
+  // Append a turn to a specific agent's dialog history.
+  appendDialogTurn: (npcId: string, turn: DialogTurn) => void;
 }
 
 let lineCounter = 0;
 
 export const useGameStore = create<GameStoreState>()((set) => ({
   followNpcId: null,
+  dialogHistoryByNpc: {},
 
   dialog: {
     active: false,
@@ -159,4 +173,15 @@ export const useGameStore = create<GameStoreState>()((set) => ({
 
   setToolStatus: (v) =>
     set((s) => ({ dialog: { ...s.dialog, toolStatus: v } })),
+
+  appendDialogTurn: (npcId, turn) =>
+    set((s) => {
+      const HISTORY_CAP = 20;
+      const prev = s.dialogHistoryByNpc[npcId] ?? [];
+      const next = [...prev, turn];
+      if (next.length > HISTORY_CAP) next.splice(0, next.length - HISTORY_CAP);
+      return {
+        dialogHistoryByNpc: { ...s.dialogHistoryByNpc, [npcId]: next },
+      };
+    }),
 }));

@@ -126,8 +126,6 @@ export default function AgentRoster() {
                 usageByAgent,
                 errorByAgent,
                 dialogNpcId,
-                hasChildren: dynamicChildrenByParent.has(n.id),
-                children: dynamicChildrenByParent.get(n.id),
                 dynamicChildrenByParent,
               }),
             )}
@@ -146,9 +144,9 @@ interface RenderRowOpts {
   >;
   errorByAgent: Record<string, { message: string; at: number }>;
   dialogNpcId: string | null;
-  hasChildren?: boolean;
-  children?: DynamicNpc[];
-  dynamicChildrenByParent?: Map<string, DynamicNpc[]>;
+  // Map of parentId → direct children, built once for the whole tree
+  // so renderRow can recurse N levels deep without rebuilding it.
+  dynamicChildrenByParent: Map<string, DynamicNpc[]>;
 }
 
 function renderRow(
@@ -156,7 +154,13 @@ function renderRow(
   isChild: boolean,
   opts: RenderRowOpts,
 ) {
-  const { activities, usageByAgent, errorByAgent, dialogNpcId, hasChildren, children } = opts;
+  const { activities, usageByAgent, errorByAgent, dialogNpcId, dynamicChildrenByParent } = opts;
+  // Look up this row's children from the global map so grandchildren
+  // (sub-agent of sub-agent) render too. The top-level call also goes
+  // through this path so we don't need separate hasChildren/children
+  // props on opts.
+  const children = dynamicChildrenByParent?.get(n.id);
+  const hasChildren = !!children && children.length > 0;
   const act = activities[n.id];
   const usage = usageByAgent[n.id];
   const isActive = dialogNpcId === n.id;

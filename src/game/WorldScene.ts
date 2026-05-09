@@ -241,6 +241,11 @@ export class WorldScene extends Phaser.Scene {
   // window so a refreshed scene picks up the previous setting.
   private debugGfx?: Phaser.GameObjects.Graphics;
   private debugVisible = false;
+  // Full-canvas tint that drifts with the system clock. Painted at
+  // depth 100 so sprites stay legible — the rectangle is purely a
+  // mood layer, not a shader.
+  private todOverlay?: Phaser.GameObjects.Rectangle;
+  private todTimer?: Phaser.Time.TimerEvent;
   // Cache of objects from the .tmj — used by the debug overlay so we
   // don't have to re-fetch the parsed map each frame.
   private debugObjects: Array<{
@@ -453,6 +458,8 @@ export class WorldScene extends Phaser.Scene {
     this.setupMouseInput();
     this.subscribeStores();
     this.startIdleSitLoop();
+    this.createTimeOfDayOverlay(mapW, mapH);
+    this.createRoomAmbience();
 
     // Tether rendering layer — sits under sprites so it doesn't obscure them.
     this.tetherGfx = this.add.graphics().setDepth(950);
@@ -537,6 +544,102 @@ export class WorldScene extends Phaser.Scene {
       loop: true,
       callback: () => this.tickIdleSit(),
     });
+  }
+
+  /** Paint a full-map mood rectangle over the world that drifts with
+   *  the wall-clock hour: warm dawn, neutral midday, cool dusk, deep
+   *  night. The overlay is a single Rectangle at depth 100, low alpha
+   *  so the underlying tiles stay legible. Refreshed once a minute. */
+  private createTimeOfDayOverlay(mapW: number, mapH: number) {
+    const rect = this.add
+      .rectangle(0, 0, mapW, mapH, 0xffffff, 0)
+      .setOrigin(0, 0)
+      .setDepth(100);
+    this.todOverlay = rect;
+    this.refreshTimeOfDay();
+    this.todTimer = this.time.addEvent({
+      delay: 60_000,
+      loop: true,
+      callback: () => this.refreshTimeOfDay(),
+    });
+  }
+
+  /** Anchor a small ambient emoji per curated room so empty rooms
+   *  feel less inert. The sprite tweens scaleY ↔ 0.94 on a slow yoyo
+   *  to read as "alive but quiet". Depth 5 keeps it above the floor
+   *  but below NPCs and tethers. Each room gets at most one. */
+  private createRoomAmbience() {
+    const AMBIENT: Partial<Record<RoomId, string>> = {
+      library: "📚",
+      desk: "☕",
+      meeting_room: "📺",
+      testing_lab: "🧪",
+    };
+    for (const region of getRoomRegions()) {
+      const emoji = AMBIENT[region.id];
+      if (!emoji) continue;
+      // Anchor near the bottom-left of the room rect rather than the
+      // center so the decoration doesn't fight a seat for the same
+      // tile. Tile-grid aligned.
+      const cx = (region.colMin + 1) * TILE_SIZE + TILE_SIZE / 2;
+      const cy = (region.rowMax) * TILE_SIZE + TILE_SIZE / 2;
+      const t = this.add
+        .text(cx, cy, emoji, { fontSize: "14px", resolution: 2 })
+        .setOrigin(0.5, 1)
+        .setDepth(5)
+        .setAlpha(0.55);
+      this.tweens.add({
+        targets: t,
+        scaleY: { from: 1, to: 0.94 },
+        duration: 2400,
+        yoyo: true,
+        repeat: -1,
+        ease: "Sine.easeInOut",
+      });
+    }
+  }
+
+  private refreshTimeOfDay() {
+    if (!this.todOverlay) return;
+    const hour = new Date().getHours() + new Date().getMinutes() / 60;
+    // Six anchor points around the day. Each is { hour, color, alpha }.
+    // The overlay lerps between the two anchors flanking `hour`.
+    const ANCHORS: Array<{ h: number; rgb: number; a: number }> = [
+      { h: 0, rgb: 0x1a1f4d, a: 0.32 }, // late night
+      { h: 5, rgb: 0xff9e7a, a: 0.18 }, // dawn
+      { h: 9, rgb: 0xffffff, a: 0.0 }, // morning (clear)
+      { h: 13, rgb: 0xfff7c0, a: 0.06 }, // midday
+      { h: 18, rgb: 0xffa066, a: 0.18 }, // dusk
+      { h: 21, rgb: 0x1a1f4d, a: 0.32 }, // night
+    ];
+    let lo = ANCHORS[ANCHORS.length - 1];
+    let hi = ANCHORS[0];
+    for (let i = 0; i < ANCHORS.length; i++) {
+      const a = ANCHORS[i];
+      const b = ANCHORS[(i + 1) % ANCHORS.length];
+      const aH = a.h;
+      const bH = b.h <= a.h ? b.h + 24 : b.h;
+      const h = hour < a.h ? hour + 24 : hour;
+      if (h >= aH && h <= bH) {
+        lo = a;
+        hi = b;
+        break;
+      }
+    }
+    const span = ((hi.h <= lo.h ? hi.h + 24 : hi.h) - lo.h) || 1;
+    const t = ((hour < lo.h ? hour + 24 : hour) - lo.h) / span;
+    const lerp = (a: number, b: number) => a + (b - a) * t;
+    const rA = (lo.rgb >> 16) & 0xff;
+    const gA = (lo.rgb >> 8) & 0xff;
+    const bA = lo.rgb & 0xff;
+    const rB = (hi.rgb >> 16) & 0xff;
+    const gB = (hi.rgb >> 8) & 0xff;
+    const bB = hi.rgb & 0xff;
+    const r = Math.round(lerp(rA, rB));
+    const g = Math.round(lerp(gA, gB));
+    const b2 = Math.round(lerp(bA, bB));
+    this.todOverlay.fillColor = (r << 16) | (g << 8) | b2;
+    this.todOverlay.fillAlpha = lerp(lo.a, hi.a);
   }
 
   private tickIdleSit() {
@@ -1018,13 +1121,19 @@ export class WorldScene extends Phaser.Scene {
     // visibly smaller.
     const restingScale = isSubAgent ? 0.85 : 1;
 
-    // Floating "HELPER" badge above sub-agents. Reads like a chip on
-    // the parent's tether, so the relationship is obvious without the
-    // user having to spot the dotted line.
+    // Floating badge above sub-agents. Reads like a chip on the
+    // parent's tether, so the relationship is obvious without the
+    // user having to spot the dotted line. Label prefers the
+    // sub-agent's `subagentType` (e.g. "RESEARCHER", "TESTER") so
+    // siblings can be told apart at a glance.
     let helperBadge: Phaser.GameObjects.Text | undefined;
     if (isSubAgent) {
+      const subagentType = (def as { subagentType?: string }).subagentType;
+      const label = subagentType
+        ? subagentType.replace(/[-_]/g, " ").toUpperCase().slice(0, 12)
+        : "HELPER";
       helperBadge = this.add
-        .text(px, py - TILE_SIZE - 10, "HELPER", {
+        .text(px, py - TILE_SIZE - 10, label, {
           fontFamily: '"Press Start 2P", monospace',
           fontSize: "7px",
           color: "#22c55e",
@@ -1058,6 +1167,13 @@ export class WorldScene extends Phaser.Scene {
     // Paint the initial pill (resting state, idle emoji). We do this once
     // the entry is in the map so renderPill can reach it by id.
     this.renderPill(def.id);
+
+    // Sub-agent appearance: flash the tether to the parent so the
+    // delegation reads as an explicit handoff rather than a random
+    // sprite popping in.
+    if (isSubAgent && parentId) {
+      this.flashTetherToParent(def.id, parentId);
+    }
 
     // Gentle spawn pop
     sprite.setScale(restingScale * 0.5);
@@ -1886,6 +2002,31 @@ export class WorldScene extends Phaser.Scene {
    * Each frame, redraw the small dotted lines that visually connect every
    * sub-agent NPC to its parent.
    */
+  /** One-shot bright pulse from parent → newly-spawned sub-agent on
+   *  the same path the persistent dashes will follow. Reads as the
+   *  moment of delegation: the parent says "go", the helper appears.
+   *  Uses a temporary Graphics overlay so it doesn't interfere with
+   *  the per-frame `drawTethers` redraw. */
+  private flashTetherToParent(childId: string, parentId: string) {
+    const child = this.npcs.get(childId);
+    const parent = this.npcs.get(parentId);
+    if (!child || !parent) return;
+    const flash = this.add.graphics().setDepth(951);
+    const px = parent.sprite.x;
+    const py = parent.sprite.y;
+    const cx = child.sprite.x;
+    const cy = child.sprite.y;
+    flash.lineStyle(3, 0x6ee7b7, 1);
+    flash.lineBetween(px, py, cx, cy);
+    this.tweens.add({
+      targets: flash,
+      alpha: { from: 1, to: 0 },
+      duration: 500,
+      ease: "Quad.easeOut",
+      onComplete: () => flash.destroy(),
+    });
+  }
+
   private drawTethers() {
     if (!this.tetherGfx) return;
     this.tetherGfx.clear();
@@ -2178,6 +2319,16 @@ export class WorldScene extends Phaser.Scene {
     // If there's already a helper, just leave it; the dispose will happen on
     // the next non-Task activity.
     if (entity.helper) return;
+
+    // Skip the legacy floating-helper sprite when the hook-side linker
+    // has already produced a real sub-agent NPC (`metadata.parentId`
+    // matches this entity). Otherwise we'd render two visual children
+    // for one Task call — the helper sprite plus the real NPC.
+    for (const other of this.npcs.values()) {
+      if ((other.def as { parentId?: string }).parentId === entity.def.id) {
+        return;
+      }
+    }
 
     // Pick a Modern character that is NOT the parent's. Hash the
     // sub-agent type so the same task tool (e.g. "general-purpose")

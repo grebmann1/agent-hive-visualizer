@@ -29,6 +29,10 @@ export interface DynamicNpc extends NpcDef {
   // roster to pick a chip color and by the renderer to seed the
   // character-pool hash so providers visually differ.
   provider?: AgentProviderId;
+  // For NPCs adopted via the Task spawn linker, this is the
+  // `subagent_type` from the parent's tool input (e.g. "researcher").
+  // Used by the floating helper badge to label sub-agents by purpose.
+  subagentType?: string;
 }
 
 export type AgentProviderId = "claude" | "claude-master" | "cursor";
@@ -142,6 +146,7 @@ export function makeDynamicNpc(input: {
   terminalId?: string;
   external?: boolean;
   provider?: AgentProviderId;
+  subagentType?: string;
 }): DynamicNpc {
   const h = hashId(input.id);
   const palette = DYNAMIC_PALETTES[h % DYNAMIC_PALETTES.length];
@@ -199,6 +204,7 @@ export function makeDynamicNpc(input: {
     terminalId: input.terminalId,
     external: input.external,
     provider,
+    subagentType: input.subagentType,
     id: input.id,
     name: input.name,
     role,

@@ -81,6 +81,8 @@ function createAPI(provider: AgentProvider): AgentProviderAPI {
         (agent.metadata as
           | { provider?: import("../stores/useNpcStore").AgentProviderId }
           | undefined)?.provider;
+      const subagentType =
+        (agent.metadata as { subagentType?: string } | undefined)?.subagentType;
       if (!existing) {
         // Create a new NPC from identity + optional parentId + terminalId.
         const npc: DynamicNpc = makeDynamicNpc({
@@ -93,6 +95,7 @@ function createAPI(provider: AgentProvider): AgentProviderAPI {
           terminalId,
           external,
           provider: providerId,
+          subagentType,
           pid: realPid,
         });
         store.addDynamic(npc);

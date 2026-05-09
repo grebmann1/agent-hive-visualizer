@@ -24,7 +24,11 @@ export type AgentEventType =
   | "agent.completed"
   | "agent.waiting_for_user"
   | "agent.thinking"
-  | "agent.session";
+  | "agent.session"
+  // Emitted on the PARENT agent's stream when a Task-spawned helper
+  // finishes (SubagentStop). metadata: { childAgentId: string,
+  // summary?: string, isError?: boolean }
+  | "agent.subagent.completed";
 
 export interface AgentEvent {
   type: AgentEventType;
