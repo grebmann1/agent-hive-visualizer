@@ -7,7 +7,7 @@
   "main": "electron/main.js",
   "private": true,
   "scripts": {
-    "sync:map": "cp tiled/dist/fullMap.tmj public/assets/maps/fullMap.tmj",
+    "sync:map": "test -f tiled/dist/fullMap.tmj && cp tiled/dist/fullMap.tmj public/assets/maps/fullMap.tmj || echo '[sync:map] no Tiled source — using committed public/assets/maps/fullMap.tmj'",
     "dev:web": "next dev -p 3017",
     "dev": "npm run sync:map && concurrently -k -n next,electron -c blue,magenta \"npm:dev:web\" \"wait-on http://localhost:3017 && cross-env AGENTQUEST_DEV_URL=http://localhost:3017 ELECTRON_DISABLE_SECURITY_WARNINGS=true electron .\"",
     "build:web": "npm run sync:map && next build",
