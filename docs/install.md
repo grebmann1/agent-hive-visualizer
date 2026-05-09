@@ -6,10 +6,53 @@ canvas stays empty even with live `claude` sessions running.
 
 This page walks through:
 
-1. The two install paths (one-click and manual).
-2. What gets written to your machine.
-3. How to verify the connection.
-4. How to uninstall cleanly.
+1. Installing the **Agent Force HQ app** itself (DMG, dev build, or
+   from source).
+2. The two hook-install paths (one-click and manual).
+3. What gets written to your machine.
+4. How to verify the connection.
+5. How to uninstall cleanly.
+
+---
+
+## 0. Get the app
+
+### Option A — DMG (recommended)
+
+Download the latest `Agent Force HQ-<version>.dmg` from the
+project's GitHub Releases page, double-click it, and drag
+**Agent Force HQ.app** onto **Applications**. Universal binary
+(Apple Silicon + Intel).
+
+The first time you launch it, macOS Gatekeeper may complain because
+the DMG is signed but not notarized for free distribution yet —
+right-click the app → **Open** → **Open** to bypass once. After
+that it launches like any other app.
+
+### Option B — Build the DMG locally
+
+```bash
+git clone https://github.com/grebmann1/agent-hive-visualizer.git
+cd agent-hive-visualizer
+npm install
+npm run dist
+open "release/Agent Force HQ-0.1.0.dmg"
+```
+
+See [`build-installer.md`](build-installer.md) for the full build
+documentation, signing, and notarization.
+
+### Option C — Run from source (dev mode)
+
+```bash
+git clone https://github.com/grebmann1/agent-hive-visualizer.git
+cd agent-hive-visualizer
+npm install
+npm run dev
+```
+
+Launches the Next.js dev server and opens the Electron window with
+hot reload. Best for poking at the code.
 
 ---
 

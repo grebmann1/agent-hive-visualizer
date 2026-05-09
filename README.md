@@ -28,12 +28,26 @@ agents *actually work*.
 
 ## Quick start
 
+### Install the app
+
+Grab the latest `Agent Force HQ-<version>.dmg` from
+[Releases](https://github.com/grebmann1/agent-hive-visualizer/releases),
+mount it, and drag **Agent Force HQ.app** into **Applications**.
+Universal binary (Apple Silicon + Intel).
+
+If you'd rather build it yourself:
+
 ```bash
 npm install
-npm run dev
+npm run dist    # signed .dmg in release/ (set Apple notarization env vars for distribution)
+npm run pack    # unsigned .app in release/mac-arm64/ (faster local iteration)
+npm run dev     # Next.js + Electron with hot reload, no DMG
 ```
 
-That launches the Next.js dev server and opens the Electron window.
+See [`docs/build-installer.md`](docs/build-installer.md) for full
+build, signing, and notarization details.
+
+### Connect Claude
 
 The first time it runs, you'll see a **◆ LIVE HOOKS NOT INSTALLED**
 banner at the top. Click **Install hooks** to wire Agent Force HQ
@@ -41,15 +55,8 @@ into your `~/.claude/settings.json` (one-click; reversible). After
 that, run `claude` in any project and the agent should walk into
 Reception within a few seconds.
 
-If you'd rather install manually or want to know exactly what gets
-written to disk, see [`docs/install.md`](docs/install.md).
-
-For a packaged macOS build:
-
-```bash
-npm run pack    # unsigned .app in release/mac-arm64/
-npm run dist    # signed .dmg, requires Apple notarization env vars
-```
+For manual install, exactly what gets written to disk, and uninstall
+steps, see [`docs/install.md`](docs/install.md).
 
 ## How it works at a glance
 
