@@ -17,8 +17,11 @@
 /.next/
 /out/
 
-# production
-/build
+# production — but keep the electron-builder resources dir's source
+# files. The `/build` directory holds the icon, entitlements,
+# notarize hook, and icon-source script we need at build time.
+/build/icon-source/icon-1024.png
+/build/icon-source/icon.iconset
 
 # electron-builder output
 /release
