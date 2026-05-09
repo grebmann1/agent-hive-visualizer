@@ -163,7 +163,9 @@ function renderRow(
   const isDynamic = "dynamic" in n;
   const isExternal = isDynamic && (n as DynamicNpc).external === true;
   const avatarSize = isChild ? 24 : 40;
-  const indent = isChild ? "pl-6" : "";
+  // Sub-agents render nested under their parent — bigger left padding
+  // plus a thin accent border so the relationship is unmistakable.
+  const indent = isChild ? "pl-8 border-l-2 border-accent-dark/40 ml-3" : "";
 
   const handleClick = () => {
     // Always summon in-world.

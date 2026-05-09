@@ -57,10 +57,7 @@ export default function Intro() {
   };
 
   return (
-    <div
-      className="hud-chip fixed top-12 left-1/2 -translate-x-1/2 z-30 flex items-center gap-3"
-      style={{ pointerEvents: "auto" }}
-    >
+    <div className="hud-chip hud-chip-interactive fixed top-12 left-1/2 -translate-x-1/2 z-30 flex items-center gap-3">
       <div className="flex flex-col gap-0.5">
         <div className="pixel-font text-[10px] text-accent-dark">
           ◆ WELCOME TO AGENT FORCE HQ
@@ -74,7 +71,6 @@ export default function Intro() {
         onClick={dismiss}
         className="pixel-font text-[11px] text-ink-soft hover:text-ink"
         aria-label="Dismiss welcome"
-        style={{ pointerEvents: "auto" }}
       >
         ×
       </button>

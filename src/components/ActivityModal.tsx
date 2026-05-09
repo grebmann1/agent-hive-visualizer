@@ -393,7 +393,10 @@ export default function ActivityModal() {
                     </div>
                   )}
                   {isOpen && hasExpandable && (
-                    <pre className="whitespace-pre-wrap text-[11px] font-mono bg-paper-dim p-2 rounded mt-1">
+                    <pre
+                      className="whitespace-pre-wrap text-[11px] font-mono bg-paper-dim p-2 rounded mt-1"
+                      style={{ wordBreak: "break-word", overflowWrap: "anywhere" }}
+                    >
                       {fullText}
                     </pre>
                   )}

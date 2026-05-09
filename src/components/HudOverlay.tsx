@@ -46,7 +46,7 @@ function ControlsHint() {
         style={{
           // The text is doubled inside so the loop seam is invisible.
           // Translates from 0 → -50% across MARQUEE_DURATION.
-          animation: "hudMarquee 12s linear infinite",
+          animation: "hudMarquee 18s linear infinite",
         }}
       >
         DRAG &middot; SCROLL ZOOM &middot; CLICK AGENT &middot; HOVER FOR

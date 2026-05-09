@@ -783,11 +783,15 @@ export class WorldScene extends Phaser.Scene {
     const hasAgents = Object.keys(dyn).length > 0;
     const targetAlpha = hasAgents ? 0 : 0.85;
     for (const t of this.emptyStateLabels) {
-      if (Math.abs(t.alpha - targetAlpha) < 0.02) continue;
-      // Smooth fade over a few frames — avoids the "popping" that an
-      // instant-set produces when an agent walks in.
-      const next = t.alpha + (targetAlpha - t.alpha) * 0.15;
-      t.setAlpha(next);
+      const delta = targetAlpha - t.alpha;
+      if (Math.abs(delta) < 0.02) {
+        // Snap to target so labels actually settle at 0 / 0.85
+        // instead of asymptoting at ~0.019 forever.
+        if (t.alpha !== targetAlpha) t.setAlpha(targetAlpha);
+        continue;
+      }
+      // Smooth lerp during the transition.
+      t.setAlpha(t.alpha + delta * 0.15);
     }
   }
 
@@ -936,26 +940,31 @@ export class WorldScene extends Phaser.Scene {
     sprite.on("pointerover", () => {
       if (useGameStore.getState().dialog.active) return;
       const ent = this.npcs.get(def.id);
-      if (ent) {
-        ent.pillHover = true;
-        this.renderPill(def.id);
-      }
+      if (!ent) return;
+      ent.pillHover = true;
+      this.renderPill(def.id);
+      // Skip the scale bump while a non-idle choreo is animating the
+      // sprite — the sit-down squash and typing pulse already mutate
+      // scaleY, and stacking another tween produces a wobble.
+      if (ent.choreo && ent.choreo.kind !== "idle-bob") return;
+      // Always pop relative to resting scale so multiple hovers in a
+      // row don't compound (1.08× × 1.08× × … each pointerover).
+      const target = ent.restingScale * 1.08;
       this.tweens.add({
         targets: sprite,
-        scaleX: sprite.scaleX * 1.08,
-        scaleY: sprite.scaleY * 1.08,
+        scaleX: target,
+        scaleY: target,
         duration: 120,
         ease: "Quad.easeOut",
       });
     });
     sprite.on("pointerout", () => {
-      // Look up the resting scale for this NPC and tween back to it.
       const ent = this.npcs.get(def.id);
-      const target = ent?.restingScale ?? 1;
-      if (ent) {
-        ent.pillHover = false;
-        this.renderPill(def.id);
-      }
+      if (!ent) return;
+      ent.pillHover = false;
+      this.renderPill(def.id);
+      if (ent.choreo && ent.choreo.kind !== "idle-bob") return;
+      const target = ent.restingScale;
       this.tweens.add({
         targets: sprite,
         scaleX: target,
@@ -1696,12 +1705,13 @@ export class WorldScene extends Phaser.Scene {
 
       // Pin the HELPER badge above the pill (sub-agents only).
       // Sits one row above the pill so it doesn't fight the thinking
-      // badge for vertical space.
+      // badge for vertical space. Clamp to a minimum y so a sub-agent
+      // spawned near the top edge of the map doesn't end up with the
+      // chip stuck above the camera viewport.
       if (npc.helperBadge) {
-        npc.helperBadge.setPosition(
-          npc.sprite.x,
-          npc.sprite.y - TILE_SIZE - 36,
-        );
+        const desiredY = npc.sprite.y - TILE_SIZE - 36;
+        const minY = 12;
+        npc.helperBadge.setPosition(npc.sprite.x, Math.max(minY, desiredY));
         npc.helperBadge.setDepth(1599 + npc.sprite.y);
       }
 

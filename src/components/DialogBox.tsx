@@ -61,6 +61,9 @@ export default function DialogBox() {
   const [done, setDone] = useState(false);
   const [input, setInput] = useState("");
   const inputRef = useRef<HTMLInputElement | null>(null);
+  // The streaming-text container — we pin scroll to the bottom each
+  // time `revealed` grows so long replies don't slide out of view.
+  const lineScrollRef = useRef<HTMLDivElement | null>(null);
   const conversationRef = useRef<
     Array<{ role: "user" | "assistant"; content: string }>
   >([]);
@@ -106,6 +109,15 @@ export default function DialogBox() {
       setInput("");
     }
   }, [dialog.active, dialog.npcId]);
+
+  // Pin scroll to the bottom whenever the visible line grows so long
+  // streaming replies stay readable instead of disappearing past the
+  // dialog's max-height.
+  useEffect(() => {
+    const el = lineScrollRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, [revealed]);
 
   useEffect(() => {
     if (!dialog.active) {
@@ -577,7 +589,10 @@ export default function DialogBox() {
             onSessionDead={termId ? !termAlive : false}
           />
         ) : (
-        <div className="min-h-[88px] text-[15px] leading-[1.6] text-ink">
+        <div
+          ref={lineScrollRef}
+          className="min-h-[88px] max-h-[260px] overflow-y-auto pixel-scroll text-[15px] leading-[1.6] text-ink"
+        >
           {line ? (
             <>
               {line.source === "player" ? (
