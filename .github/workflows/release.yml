@@ -34,8 +34,7 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npm run dist
+        run: npm run build:web && npx electron-builder --mac --publish never
 
       - name: Upload artifacts to the release
         env:
@@ -50,6 +49,6 @@ jobs:
               --generate-notes
           fi
           shopt -s nullglob
-          for f in release/*.dmg release/*.zip release/*.blockmap; do
+          for f in release/*.dmg release/*.zip release/*.blockmap release/latest-mac.yml; do
             gh release upload "$tag" "$f" --clobber
           done
