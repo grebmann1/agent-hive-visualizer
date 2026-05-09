@@ -1,0 +1,4 @@
+# Default owner for everything in the repo. Add additional reviewers
+# by path as the team grows (e.g. a separate owner for the Tiled
+# map source).
+*       @grebmann1
