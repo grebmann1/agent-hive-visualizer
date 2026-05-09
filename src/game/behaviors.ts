@@ -17,14 +17,10 @@
 //   priority — optional — higher wins on tie. Default 0. Use for overlapping
 //              matchers (e.g. a catch-all "any tool" fallback with priority -1).
 
-import type { AgentEvent, RoomId } from "../events/types";
+import { eventToolName, type AgentEvent, type RoomId } from "../events/types";
 import type { ChoreoKind } from "./choreo";
 import { buildToolMessage } from "../components/tool-format";
 
-// Capitalize the first letter of a string (in-place, no allocation
-// when empty). Used to turn the lower-case narrative coming from
-// buildToolMessage ("editing a file") into a sentence-cased bubble
-// label ("Editing a file").
 function sentence(s: string): string {
   if (!s) return s;
   return s.charAt(0).toUpperCase() + s.slice(1);
@@ -34,7 +30,7 @@ function sentence(s: string): string {
 // Behaviors only need to provide the fallback they want when no tool is
 // in flight (e.g. an `agent.thinking` event with no metadata.toolName).
 function describeViaToolFormat(event: AgentEvent, fallback: string): string {
-  const tn = (event.metadata as { toolName?: string } | undefined)?.toolName;
+  const tn = eventToolName(event);
   const input = (event.metadata as { input?: unknown } | undefined)?.input;
   if (!tn) return fallback;
   return sentence(buildToolMessage(tn, input));
@@ -50,10 +46,7 @@ export interface AgentBehavior {
   priority?: number;
 }
 
-function toolName(event: AgentEvent): string | undefined {
-  const v = (event.metadata as { toolName?: unknown } | undefined)?.toolName;
-  return typeof v === "string" ? v : undefined;
-}
+const toolName = eventToolName;
 
 // --------------------------------------------------------------------------
 // The registry. ORDER MATTERS when priorities tie — first match wins.
@@ -71,10 +64,11 @@ export const BEHAVIORS: AgentBehavior[] = [
   },
 
   // ─── File writing / editing ───────────────────────────────────────────
+  // Coding happens at the agent's own desk — same screen, just typing.
   {
     id: "edit-file",
     label: "Editing a file",
-    room: "coding_room",
+    room: "desk",
     choreo: "typing",
     matches: (e) => {
       const t = toolName(e);

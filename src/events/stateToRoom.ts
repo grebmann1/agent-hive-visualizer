@@ -7,7 +7,9 @@ export const stateToRoom: Record<AgentState, RoomId> = {
   completed: "desk",
   thinking: "desk",
   planning: "desk",
-  coding: "coding_room",
+  // Coding happens at the agent's own desk — the visual we want is
+  // "agent sits down and types" rather than "agent walks to a code lab".
+  coding: "desk",
   reading_file: "library",
   searching: "library",
   calling_tool: "tool_workshop",
@@ -15,7 +17,8 @@ export const stateToRoom: Record<AgentState, RoomId> = {
   // the visual reads as "delegating to a helper".
   talking_to_agent: "meeting_room",
   running_tests: "testing_lab",
-  debugging: "coding_room",
+  // Debugging is also a desk activity — same screen, different mood.
+  debugging: "desk",
   deploying: "tool_workshop",
   summarizing: "desk",
   failed: "desk",

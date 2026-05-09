@@ -1,5 +1,10 @@
 import Phaser from "phaser";
-import type { AgentEvent, AnimationId, RoomId } from "../events/types";
+import {
+  eventToolName,
+  type AgentEvent,
+  type AnimationId,
+  type RoomId,
+} from "../events/types";
 import {
   emojiForActivity,
   ERROR_EMOJI,
@@ -1077,8 +1082,7 @@ export class WorldScene extends Phaser.Scene {
     // would walk to the SAME room anchor on session start, which
     // looked like "two agents at one desk".
     const pending = useAgentStore.getState().activities[def.id];
-    const pendingTool =
-      (pending?.event.metadata as { toolName?: string } | undefined)?.toolName;
+    const pendingTool = pending ? eventToolName(pending.event) : undefined;
     const dynamicTopLevel = isDynamic && !parentId;
 
     if (pending && pendingTool) {
@@ -1471,8 +1475,7 @@ export class WorldScene extends Phaser.Scene {
         this.lastActivityAt.set(agentId, this.time.now);
         this.releaseSeat(agentId);
         this.walkNpcToRoom(agentId, act.room);
-        const toolName = (act.event.metadata as { toolName?: string } | undefined)
-          ?.toolName;
+        const toolName = eventToolName(act.event);
         const isError =
           act.event.type === "agent.tool.result" &&
           Boolean(
@@ -1585,9 +1588,10 @@ export class WorldScene extends Phaser.Scene {
    *  a single silhouette. We do NOT touch npc.col/npc.row — the
    *  pathfinder still treats them as occupying their authored cell. */
   private tickSpriteSeparation() {
-    const SEPARATION_RADIUS = 18; // smaller than a tile (32) on purpose
+    const RADIUS = 18; // smaller than a tile (32) on purpose
+    const RADIUS_SQ = RADIUS * RADIUS;
     const PUSH_PER_FRAME = 0.6;
-    const MAX_OFFSET = 14;
+    const MAX_OFFSET_SQ = 14 * 14;
     for (const [aId, a] of this.npcs) {
       if (!a.sprite || !a.sprite.scene) continue;
       // Skip mid-step tweens (the walk owns the position) and seated
@@ -1601,29 +1605,38 @@ export class WorldScene extends Phaser.Scene {
         if (!b.sprite || !b.sprite.scene) continue;
         const distX = a.sprite.x - b.sprite.x;
         const distY = a.sprite.y - b.sprite.y;
-        const dist = Math.hypot(distX, distY) || 0.0001;
-        if (dist >= SEPARATION_RADIUS) continue;
-        // Symmetric push proportional to overlap.
-        const overlap = (SEPARATION_RADIUS - dist) / SEPARATION_RADIUS;
-        dx += (distX / dist) * overlap;
-        dy += (distY / dist) * overlap;
+        const distSq = distX * distX + distY * distY;
+        if (distSq >= RADIUS_SQ) continue;
+        // Squared-distance early-out keeps the inner loop sqrt-free.
+        const dist = Math.sqrt(distSq) || 0.0001;
+        // Symmetric push proportional to overlap, normalized inline.
+        const factor = (RADIUS - dist) / (RADIUS * dist);
+        dx += distX * factor;
+        dy += distY * factor;
       }
       if (dx === 0 && dy === 0) continue;
-      // Cap the per-frame nudge so two clustered agents don't pop apart
-      // explosively — we want a subtle "make room" motion.
-      const mag = Math.hypot(dx, dy) || 1;
-      const stepX = (dx / mag) * PUSH_PER_FRAME;
-      const stepY = (dy / mag) * PUSH_PER_FRAME;
+      // Normalize the accumulated push to a fixed step size, capped so
+      // two clustered agents drift apart subtly rather than popping.
+      const pushSq = dx * dx + dy * dy;
+      if (pushSq > 0) {
+        const inv = PUSH_PER_FRAME / Math.sqrt(pushSq);
+        dx *= inv;
+        dy *= inv;
+      }
       // Cap total drift from the canonical tile center so a sprite
       // never reads as being in a different tile than npc.col/npc.row.
       const centerX = a.col * TILE_SIZE + TILE_SIZE / 2;
       const centerY = a.row * TILE_SIZE + TILE_SIZE / 2;
-      const offX = a.sprite.x + stepX - centerX;
-      const offY = a.sprite.y + stepY - centerY;
-      const offMag = Math.hypot(offX, offY);
-      const scale = offMag > MAX_OFFSET ? MAX_OFFSET / offMag : 1;
-      const nextX = centerX + offX * scale;
-      const nextY = centerY + offY * scale;
+      let offX = a.sprite.x + dx - centerX;
+      let offY = a.sprite.y + dy - centerY;
+      const offSq = offX * offX + offY * offY;
+      if (offSq > MAX_OFFSET_SQ) {
+        const scale = Math.sqrt(MAX_OFFSET_SQ / offSq);
+        offX *= scale;
+        offY *= scale;
+      }
+      const nextX = centerX + offX;
+      const nextY = centerY + offY;
       a.sprite.setPosition(nextX, nextY);
       a.shadow.setPosition(nextX, nextY + 7);
     }
@@ -1692,20 +1705,25 @@ export class WorldScene extends Phaser.Scene {
         npc.helperBadge.setDepth(1599 + npc.sprite.y);
       }
 
+      // Decay any expired transient overheads (error flash, prompt
+      // flash). Both share the same shape; one branch handles either.
+      const now = this.time.now;
+      let expired = false;
       if (
         npc.overheadErrorUntil !== undefined &&
-        this.time.now >= npc.overheadErrorUntil
+        now >= npc.overheadErrorUntil
       ) {
         npc.overheadErrorUntil = undefined;
-        this.renderPill(id);
+        expired = true;
       }
       if (
         npc.overheadPromptUntil !== undefined &&
-        this.time.now >= npc.overheadPromptUntil
+        now >= npc.overheadPromptUntil
       ) {
         npc.overheadPromptUntil = undefined;
-        this.renderPill(id);
+        expired = true;
       }
+      if (expired) this.renderPill(id);
     }
   }
 
@@ -1758,14 +1776,12 @@ export class WorldScene extends Phaser.Scene {
         continue;
       }
 
-      // Build (or reuse) the badge.
-      if (!npc.thinkingBadge || npc.thinkingBadge.text.text !== text) {
-        npc.thinkingBadge?.container.destroy();
-        npc.thinkingBadge?.maskGfx.destroy();
+      // Build the badge once; subsequent text changes mutate the
+      // existing Text + Graphics instead of allocating fresh ones.
+      const innerW = BOX_W - PAD_X * 2;
+      if (!npc.thinkingBadge) {
         const container = this.add.container(0, 0).setAlpha(0.95);
         const bg = this.add.graphics();
-        // The chip's background — solid paper-dim with mint border so
-        // it reads as a UI affordance, not a void rectangle.
         bg.fillStyle(0x141827, 0.95);
         bg.fillRoundedRect(-BOX_W / 2, -BOX_H / 2, BOX_W, BOX_H, 3);
         bg.lineStyle(1, 0x2a3150, 1);
@@ -1781,17 +1797,6 @@ export class WorldScene extends Phaser.Scene {
           resolution: 3,
         });
         t.setOrigin(0, 0.5);
-        const measured = t.width;
-        const innerW = BOX_W - PAD_X * 2;
-        const overflows = measured > innerW;
-
-        // Initial text x: left-aligned (with PAD) when it fits, otherwise
-        // start at the left edge so the marquee scrolls leftward.
-        if (overflows) {
-          t.setPosition(-BOX_W / 2 + PAD_X, 0);
-        } else {
-          t.setPosition(-measured / 2, 0);
-        }
 
         container.add(bg);
         container.add(t);
@@ -1802,30 +1807,36 @@ export class WorldScene extends Phaser.Scene {
         const maskGfx = this.make
           .graphics({ x: 0, y: 0 })
           .fillRect(-innerW / 2, -BOX_H / 2 + 1, innerW, BOX_H - 2);
-        const mask = maskGfx.createGeometryMask();
-        t.setMask(mask);
+        t.setMask(maskGfx.createGeometryMask());
 
         npc.thinkingBadge = {
           container,
           bg,
           text: t,
           maskGfx,
-          pixelWidth: measured,
+          pixelWidth: t.width,
           boxWidth: innerW,
           boxHeight: BOX_H,
         };
+      } else if (npc.thinkingBadge.text.text !== text) {
+        // Same badge, new content. Just update the text and recompute
+        // measured width — the bg + mask + container stay put.
+        npc.thinkingBadge.text.setText(text);
+        npc.thinkingBadge.pixelWidth = npc.thinkingBadge.text.width;
       }
-
-      const badge = npc.thinkingBadge!;
-      // Marquee: scroll the text leftward when it doesn't fit.
+      const badge = npc.thinkingBadge;
       const overflows = badge.pixelWidth > badge.boxWidth;
-      if (overflows) {
+      if (!overflows) {
+        // Centered when the text fits.
+        badge.text.setPosition(-badge.pixelWidth / 2, 0);
+      } else {
+        // Marquee: scroll the text leftward, looping every cycle px.
         const cycle = badge.pixelWidth + TAIL_GAP;
         const elapsedMs = now - (npc.thinkingUpdatedAt ?? now);
         const offset = ((elapsedMs / 1000) * SCROLL_SPEED) % cycle;
-        badge.text.setX(-BOX_W / 2 + PAD_X - offset);
+        badge.text.setPosition(-BOX_W / 2 + PAD_X - offset, 0);
       }
-      // Pin to sprite each frame so it follows movement.
+      // Pin container + mask to the sprite each frame.
       const cx = npc.sprite.x;
       const cy = npc.sprite.y - TILE_SIZE - 22;
       badge.container.setPosition(cx, cy);
@@ -1845,11 +1856,8 @@ export class WorldScene extends Phaser.Scene {
     for (const [, npc] of this.npcs) {
       if (!npc.sprite || !npc.sprite.scene) continue;
       const target = npc.transitTarget;
-      const text = target
-        ? `🚶 → ${roomById(target)?.label ?? target}`
-        : "";
 
-      if (!text) {
+      if (!target) {
         if (npc.transitBadge) {
           npc.transitBadge.destroy();
           npc.transitBadge = undefined;
@@ -1858,25 +1866,31 @@ export class WorldScene extends Phaser.Scene {
         continue;
       }
 
-      if (!npc.transitBadge) {
-        npc.transitBadge = this.add
-          .text(npc.sprite.x, npc.sprite.y - TILE_SIZE - 22, text, {
-            fontFamily: '"Press Start 2P", monospace',
-            fontSize: "8px",
-            color: "#6ee7b7",
-            backgroundColor: "#141827",
-            padding: { x: 4, y: 2 },
-            resolution: 3,
-          })
-          .setOrigin(0.5, 1)
-          .setDepth(1599 + npc.sprite.y)
-          .setAlpha(0.95);
-        npc.transitText = text;
-      } else {
-        if (npc.transitText !== text) {
+      // Room labels are stable per RoomId — only re-stringify on a real
+      // change to avoid roomById() + template-string allocs every frame.
+      const targetKey = `transit:${target}`;
+      let text = npc.transitText;
+      if (text === undefined || npc.transitText !== targetKey) {
+        text = `🚶 → ${roomById(target)?.label ?? target}`;
+        if (!npc.transitBadge) {
+          npc.transitBadge = this.add
+            .text(npc.sprite.x, npc.sprite.y - TILE_SIZE - 22, text, {
+              fontFamily: '"Press Start 2P", monospace',
+              fontSize: "8px",
+              color: "#6ee7b7",
+              backgroundColor: "#141827",
+              padding: { x: 4, y: 2 },
+              resolution: 3,
+            })
+            .setOrigin(0.5, 1)
+            .setAlpha(0.95);
+        } else {
           npc.transitBadge.setText(text);
-          npc.transitText = text;
         }
+        // Cache by RoomId so the same target doesn't keep re-rendering.
+        npc.transitText = targetKey;
+      }
+      if (npc.transitBadge) {
         npc.transitBadge.setPosition(
           npc.sprite.x,
           npc.sprite.y - TILE_SIZE - 22,

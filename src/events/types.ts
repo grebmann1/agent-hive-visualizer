@@ -59,3 +59,10 @@ export interface VisualAction {
   bubble: string;
   face: string;
 }
+
+/** Extract the in-flight tool name from an event's metadata, with a
+ *  typed cast so callers don't have to repeat the same `as` dance. */
+export function eventToolName(event: AgentEvent): string | undefined {
+  const v = (event.metadata as { toolName?: unknown } | undefined)?.toolName;
+  return typeof v === "string" ? v : undefined;
+}

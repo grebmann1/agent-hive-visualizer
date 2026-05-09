@@ -10,7 +10,42 @@ import { useTerminalStore } from "../stores/useTerminalStore";
 import { useToastStore } from "../stores/useToastStore";
 import { useWorldBus } from "../stores/useWorldBus";
 import type { NpcDef } from "../game/npcs";
-import type { DynamicNpc } from "../stores/useNpcStore";
+import type { AgentProviderId, DynamicNpc } from "../stores/useNpcStore";
+
+// Per-provider chip styling. Looked up by `provider` first; the
+// "external" branch is a legacy fallback for NPCs upserted before the
+// provider field existed.
+type ChipDef = { label: string; bg: string; color: string; title?: string };
+
+const PROVIDER_CHIPS: Record<AgentProviderId | "external" | "live", ChipDef> = {
+  cursor: { label: "CURSOR", bg: "#5b3a7c", color: "#fff", title: "Cursor agent" },
+  "claude-master": {
+    label: "MASTER",
+    bg: "#22c55e",
+    color: "#0e1018",
+    title: "Master Claude (orchestrator)",
+  },
+  external: {
+    label: "EXTERNAL",
+    bg: "#2a3150",
+    color: "#8e94bf",
+    title: "Detected external session (not launched from Agent Force HQ)",
+  },
+  claude: { label: "LIVE", bg: "#c9a959", color: "#1b1e2b" },
+  live: { label: "LIVE", bg: "#c9a959", color: "#1b1e2b" },
+};
+
+function pickProviderChip(
+  isDynamic: boolean,
+  provider: AgentProviderId | undefined,
+  external: boolean,
+): ChipDef | null {
+  if (!isDynamic) return null;
+  if (provider === "cursor") return PROVIDER_CHIPS.cursor;
+  if (provider === "claude-master") return PROVIDER_CHIPS["claude-master"];
+  if (external) return PROVIDER_CHIPS.external;
+  return PROVIDER_CHIPS.live;
+}
 
 export default function AgentRoster() {
   const dialogNpcId = useGameStore((s) => s.dialog.npcId);
@@ -199,55 +234,18 @@ function renderRow(
             </span>
           )}
           {(() => {
-            // Per-provider chip — `provider` is the new field; fall back to
-            // the legacy `external` boolean for npcs that haven't been
-            // upserted with a provider yet (post-migration safety).
             const dyn = isDynamic ? (n as DynamicNpc) : null;
-            const provider = dyn?.provider ?? "claude";
-            if (provider === "cursor") {
-              return (
-                <span
-                  className="pixel-font text-[8px] px-1.5 py-0.5 rounded"
-                  style={{ background: "#5b3a7c", color: "#fff" }}
-                  title="Cursor agent"
-                >
-                  CURSOR
-                </span>
-              );
-            }
-            if (provider === "claude-master") {
-              return (
-                <span
-                  className="pixel-font text-[8px] px-1.5 py-0.5 rounded"
-                  style={{ background: "#22c55e", color: "#0e1018" }}
-                  title="Master Claude (orchestrator)"
-                >
-                  MASTER
-                </span>
-              );
-            }
-            if (isExternal) {
-              return (
-                <span
-                  className="pixel-font text-[8px] px-1.5 py-0.5 rounded"
-                  style={{ background: "#2a3150", color: "#8e94bf" }}
-                  title="Detected external session (not launched from Agent Force HQ)"
-                >
-                  EXTERNAL
-                </span>
-              );
-            }
-            if (isDynamic) {
-              return (
-                <span
-                  className="pixel-font text-[8px] px-1.5 py-0.5 rounded"
-                  style={{ background: "#c9a959", color: "#1b1e2b" }}
-                >
-                  LIVE
-                </span>
-              );
-            }
-            return null;
+            const chip = pickProviderChip(isDynamic, dyn?.provider, isExternal);
+            if (!chip) return null;
+            return (
+              <span
+                className="pixel-font text-[8px] px-1.5 py-0.5 rounded"
+                style={{ background: chip.bg, color: chip.color }}
+                title={chip.title}
+              >
+                {chip.label}
+              </span>
+            );
           })()}
           {hasChildren && (
             <span
