@@ -12,14 +12,17 @@ export const stateToRoom: Record<AgentState, RoomId> = {
   coding: "desk",
   reading_file: "library",
   searching: "library",
-  calling_tool: "tool_workshop",
+  // Bash / shell tools happen at the agent's desk — same as everything
+  // else they do day-to-day. Build Bay is reserved for future
+  // dedicated activity.
+  calling_tool: "desk",
   // Task tool → sub-agent spawn. Route the parent to the Meeting Room so
   // the visual reads as "delegating to a helper".
   talking_to_agent: "meeting_room",
   running_tests: "testing_lab",
   // Debugging is also a desk activity — same screen, different mood.
   debugging: "desk",
-  deploying: "tool_workshop",
+  deploying: "desk",
   summarizing: "desk",
   failed: "desk",
 };

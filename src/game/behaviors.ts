@@ -83,10 +83,12 @@ export const BEHAVIORS: AgentBehavior[] = [
   },
 
   // ─── Bash / terminal ──────────────────────────────────────────────────
+  // Stays at the agent's desk — the visual we want is "agent at their
+  // station, running a command" rather than "agent walks to a workshop".
   {
     id: "bash",
     label: "Running a command",
-    room: "tool_workshop",
+    room: "desk",
     choreo: "hammering",
     matches: (e) => toolName(e) === "Bash",
     describe: (e) => describeViaToolFormat(e, "Running a command"),
@@ -106,10 +108,12 @@ export const BEHAVIORS: AgentBehavior[] = [
   },
 
   // ─── Web search / fetch ───────────────────────────────────────────────
+  // Web work also happens at the desk — the agent already has a browser
+  // open at their station; we don't have a dedicated comms room yet.
   {
     id: "search-web",
     label: "Browsing the web",
-    room: "tool_workshop",
+    room: "desk",
     choreo: "browsing",
     matches: (e) => {
       const t = toolName(e);

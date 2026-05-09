@@ -12,6 +12,7 @@ import {
   PROMPT_EMOJI,
 } from "../events/stateToRoom";
 import { useAgentStore } from "../stores/useAgentStore";
+import { useActivityModalStore } from "../stores/useActivityModalStore";
 import { useGameStore } from "../stores/useGameStore";
 import { buildLiveGreeting, useNpcStore } from "../stores/useNpcStore";
 import { useWorldBus } from "../stores/useWorldBus";
@@ -113,21 +114,20 @@ const DRAG_THRESHOLD_PX = 4;
 const ZOOM_MIN = 1;
 const ZOOM_MAX = 3;
 
-/** Label shown on the always-on overhead pill. Prefers the basename
- *  of the agent's working directory (so you see WHAT the agent is
- *  working on, e.g. "agentquest" or "marketing-site"), then the
- *  agent's display name, then a stable 4-char id suffix as a last
- *  resort. Truncated to 14 chars so the pill stays compact. */
+/** Label shown on the overhead pill. Prefers the agent's display name
+ *  so it matches the right-side roster row exactly. Falls back to the
+ *  cwd basename, then a stable 4-char id suffix. Truncated to 14
+ *  characters to keep the pill compact. */
 function pillLabelFor(def: {
   id: string;
   name?: string;
   cwd?: string;
 }): string {
+  if (def.name && def.name.trim()) return def.name.slice(0, 14);
   if (def.cwd) {
     const base = def.cwd.split(/[/\\]/).filter(Boolean).pop();
     if (base) return base.slice(0, 14);
   }
-  if (def.name && def.name.trim()) return def.name.slice(0, 14);
   const tail = def.id.replace(/[^A-Za-z0-9]/g, "").slice(-4);
   return tail.toUpperCase() || "??";
 }
@@ -174,15 +174,10 @@ interface Entity {
   // marquee-style inside a fixed-width clipped container so the user
   // sees the full message over time. Auto-fades after TTL of no
   // updates so a stale "thinking..." line doesn't sit there forever.
-  thinkingBadge?: {
-    container: Phaser.GameObjects.Container;
-    bg: Phaser.GameObjects.Graphics;
-    text: Phaser.GameObjects.Text;
-    maskGfx: Phaser.GameObjects.Graphics;
-    pixelWidth: number;
-    boxWidth: number;
-    boxHeight: number;
-  };
+  // Static "INSTRUCTIONS" chip floating below the pill while the agent
+  // has fresh thinking content. Click to open the activity modal,
+  // which shows the full thinking + tool log.
+  thinkingBadge?: Phaser.GameObjects.Text;
   thinkingText?: string;
   thinkingUpdatedAt?: number;
   // Where this NPC is currently walking. Set by walkNpcToRoom and
@@ -1184,8 +1179,7 @@ export class WorldScene extends Phaser.Scene {
           npc.indicator?.destroy();
           npc.overheadContainer?.destroy();
           npc.helperBadge?.destroy();
-          npc.thinkingBadge?.container.destroy();
-          npc.thinkingBadge?.maskGfx.destroy();
+          npc.thinkingBadge?.destroy();
           npc.transitBadge?.destroy();
         },
       });
@@ -1282,6 +1276,16 @@ export class WorldScene extends Phaser.Scene {
     const code = npc.overheadCodeText;
     const emoji = npc.overheadEmojiText;
     if (!code || !emoji) return;
+
+    // Re-derive the label from the live NPC record so any post-spawn
+    // updates (e.g. collision-suffix renames in addDynamic) show up
+    // here too — otherwise the hover pill drifts away from the
+    // right-side roster row.
+    const liveDef =
+      useNpcStore.getState().dynamic[npcId] ??
+      (npc.def as { id: string; name?: string; cwd?: string });
+    const expectedLabel = pillLabelFor(liveDef);
+    if (code.text !== expectedLabel) code.setText(expectedLabel);
 
     const now = this.time.now;
     const showError =
@@ -1738,25 +1742,16 @@ export class WorldScene extends Phaser.Scene {
   }
 
   /**
-   * Pull the most recent thinking excerpt from useAgentStore and float it
-   * just below the overhead pill. Auto-expires after THINKING_BADGE_TTL_MS
-   * of no change so a stale "thinking..." line doesn't sit there forever
-   * once the agent moves on to a tool call.
+   * Show a small static "INSTRUCTIONS" chip below the pill whenever the
+   * agent has fresh thinking content. Clicking it opens the activity
+   * modal, where the full thinking text + tool log lives. We don't
+   * render the actual thinking text in-canvas — at small font sizes it
+   * either overflowed the chip or sprawled across the world.
    */
   private tickThinkingBadges() {
     const thinking = useAgentStore.getState().thinkingByAgent;
     const now = this.time.now;
-    const TTL = 6000;
-    // Visible width of the marquee box. Kept small so the badge
-    // never sprawls — anything longer scrolls inside the box.
-    const BOX_W = 72;
-    const BOX_H = 14;
-    const PAD_X = 4;
-    // Pixels per second the text scrolls right-to-left.
-    const SCROLL_SPEED = 22;
-    // Gap between the end of one scroll-cycle and the start of the
-    // next so the text reads as a loop rather than a smear.
-    const TAIL_GAP = 28;
+    const TTL = 8000;
 
     for (const [id, npc] of this.npcs) {
       if (!npc.sprite || !npc.sprite.scene) continue;
@@ -1765,7 +1760,7 @@ export class WorldScene extends Phaser.Scene {
       const raw = isTransiting ? "" : thinking[id];
       const text = raw ? raw.replace(/\s+/g, " ").trim() : "";
 
-      // Reset TTL whenever the text changes.
+      // Reset TTL whenever the underlying text changes.
       if (text && text !== npc.thinkingText) {
         npc.thinkingText = text;
         npc.thinkingUpdatedAt = now;
@@ -1777,8 +1772,7 @@ export class WorldScene extends Phaser.Scene {
 
       if (!text || expired) {
         if (npc.thinkingBadge) {
-          npc.thinkingBadge.container.destroy();
-          npc.thinkingBadge.maskGfx.destroy();
+          npc.thinkingBadge.destroy();
           npc.thinkingBadge = undefined;
         }
         npc.thinkingText = undefined;
@@ -1786,74 +1780,30 @@ export class WorldScene extends Phaser.Scene {
         continue;
       }
 
-      // Build the badge once; subsequent text changes mutate the
-      // existing Text + Graphics instead of allocating fresh ones.
-      const innerW = BOX_W - PAD_X * 2;
       if (!npc.thinkingBadge) {
-        const container = this.add.container(0, 0).setAlpha(0.95);
-        const bg = this.add.graphics();
-        bg.fillStyle(0x141827, 0.95);
-        bg.fillRoundedRect(-BOX_W / 2, -BOX_H / 2, BOX_W, BOX_H, 3);
-        bg.lineStyle(1, 0x2a3150, 1);
-        bg.strokeRoundedRect(-BOX_W / 2, -BOX_H / 2, BOX_W, BOX_H, 3);
-
-        // Only the text scrolls; mask it (NOT the bg) so the chip's
-        // border + fill stay visible at the box's full width and the
-        // characters cleanly disappear at the edges.
-        const t = this.add.text(0, 0, text, {
-          fontFamily: '"Press Start 2P", monospace',
-          fontSize: "8px",
-          color: "#d5d8ff",
-          resolution: 3,
+        const chip = this.add
+          .text(0, 0, "📝 INSTRUCTIONS", {
+            fontFamily: '"Press Start 2P", monospace',
+            fontSize: "7px",
+            color: "#d5d8ff",
+            backgroundColor: "#141827",
+            padding: { x: 5, y: 3 },
+            resolution: 3,
+          })
+          .setOrigin(0.5, 1)
+          .setAlpha(0.95);
+        chip.setInteractive({ useHandCursor: true });
+        chip.on("pointerdown", () => {
+          useActivityModalStore.getState().openFor(id);
         });
-        t.setOrigin(0, 0.5);
-
-        container.add(bg);
-        container.add(t);
-
-        // Mask the TEXT to the inner box. The mask must follow the
-        // container's world position each frame — Phaser geometry
-        // masks read the gfx's world transform.
-        const maskGfx = this.make
-          .graphics({ x: 0, y: 0 })
-          .fillRect(-innerW / 2, -BOX_H / 2 + 1, innerW, BOX_H - 2);
-        t.setMask(maskGfx.createGeometryMask());
-
-        npc.thinkingBadge = {
-          container,
-          bg,
-          text: t,
-          maskGfx,
-          pixelWidth: t.width,
-          boxWidth: innerW,
-          boxHeight: BOX_H,
-        };
-      } else if (npc.thinkingBadge.text.text !== text) {
-        // Same badge, new content. Just update the text and recompute
-        // measured width — the bg + mask + container stay put.
-        npc.thinkingBadge.text.setText(text);
-        npc.thinkingBadge.pixelWidth = npc.thinkingBadge.text.width;
+        npc.thinkingBadge = chip;
       }
-      const badge = npc.thinkingBadge;
-      const overflows = badge.pixelWidth > badge.boxWidth;
-      if (!overflows) {
-        // Centered when the text fits.
-        badge.text.setPosition(-badge.pixelWidth / 2, 0);
-      } else {
-        // Marquee: scroll the text leftward, looping every cycle px.
-        const cycle = badge.pixelWidth + TAIL_GAP;
-        const elapsedMs = now - (npc.thinkingUpdatedAt ?? now);
-        const offset = ((elapsedMs / 1000) * SCROLL_SPEED) % cycle;
-        badge.text.setPosition(-BOX_W / 2 + PAD_X - offset, 0);
-      }
-      // Pin container + mask to the sprite each frame.
+
+      // Pin to sprite each frame.
       const cx = npc.sprite.x;
       const cy = npc.sprite.y - TILE_SIZE - 22;
-      badge.container.setPosition(cx, cy);
-      badge.container.setDepth(1599 + npc.sprite.y);
-      // The mask gfx isn't a child of the container — it lives in
-      // world space, so we have to follow the container manually.
-      badge.maskGfx.setPosition(cx, cy);
+      npc.thinkingBadge.setPosition(cx, cy);
+      npc.thinkingBadge.setDepth(1599 + npc.sprite.y);
     }
   }
 

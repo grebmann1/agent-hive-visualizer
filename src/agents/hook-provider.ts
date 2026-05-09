@@ -130,6 +130,11 @@ interface AgentPresence {
 
 const IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 const PRESENCE_SWEEP_MS = 30 * 1000;
+// Window after a parent's `Task` PreToolUse during which the next
+// brand-new session_id is treated as the spawned helper. Claude's
+// hooks don't carry an explicit parent_session_id, so we infer the
+// link by timing.
+const TASK_SPAWN_WINDOW_MS = 60 * 1000;
 
 function agentIdFor(payload: HookPayload): string | null {
   if (payload.agentquest_terminal_id) {
@@ -241,6 +246,12 @@ export class HookProvider implements AgentProvider {
   private apiRef: AgentProviderAPI | null = null;
   // Active `claude -p` subprocesses keyed by agent id, for ask() routing.
   private pendingAsks = new Map<string, AskHandle>();
+  // Most recent Task tool_use per parent agent. When a brand-new
+  // session_id arrives within TASK_SPAWN_WINDOW_MS we tether it to the
+  // most recently-firing parent so the spawned helper renders nested
+  // under its caller (Claude's hook payload doesn't carry a
+  // parent_session_id, so this is our best-effort linker).
+  private recentTaskByParent = new Map<string, number>();
 
   start(api: AgentProviderAPI): () => void {
     this.apiRef = api;
@@ -334,6 +345,12 @@ export class HookProvider implements AgentProvider {
     };
     this.presence.set(agentId, presence);
     if (!existing) {
+      // Best-effort parent inference: if a known agent fired a `Task`
+      // PreToolUse in the last TASK_SPAWN_WINDOW_MS, the brand-new
+      // session showing up now is almost certainly the spawned helper.
+      // Pick the most recent open Task (Claude only spawns one Task
+      // per turn) and tether the child to it.
+      const parentId = this.findRecentTaskParent(now);
       api.upsertAgent({
         id: agentId,
         displayName: prettyName(agentId, presence.sessionId),
@@ -345,8 +362,12 @@ export class HookProvider implements AgentProvider {
           external,
           model: presence.model,
           provider: "claude",
+          parentId,
         },
       });
+      // Once consumed, clear the slot so a subsequent unrelated
+      // session join doesn't accidentally reuse the same parent.
+      if (parentId) this.recentTaskByParent.delete(parentId);
     }
 
     const timestamp = new Date(now).toISOString();
@@ -396,6 +417,11 @@ export class HookProvider implements AgentProvider {
         return;
 
       case "PreToolUse": {
+        // If this parent just kicked off a Task, remember it so the
+        // helper session that arrives in the next ~60s is tethered.
+        if (payload.tool_name === "Task") {
+          this.recentTaskByParent.set(agentId, now);
+        }
         const state = toolToState(payload.tool_name);
         const file =
           pickString(payload.tool_input, "file_path") ??
@@ -483,6 +509,30 @@ export class HookProvider implements AgentProvider {
         this.presence.delete(agentId);
       }
     }
+    // Drop stale Task entries — if no helper showed up within the
+    // window, the Task probably ran without a sub-agent (e.g. a Task
+    // tool that doesn't actually spawn one).
+    for (const [parentId, ts] of this.recentTaskByParent) {
+      if (now - ts > TASK_SPAWN_WINDOW_MS) {
+        this.recentTaskByParent.delete(parentId);
+      }
+    }
+  }
+
+  /** Return the agentId of the most recently-firing parent that opened
+   *  a `Task` tool_use in the last TASK_SPAWN_WINDOW_MS. Used by the
+   *  upsert flow to tether a brand-new session to its caller. */
+  private findRecentTaskParent(now: number): string | undefined {
+    let bestId: string | undefined;
+    let bestTs = 0;
+    for (const [parentId, ts] of this.recentTaskByParent) {
+      if (now - ts > TASK_SPAWN_WINDOW_MS) continue;
+      if (ts > bestTs) {
+        bestTs = ts;
+        bestId = parentId;
+      }
+    }
+    return bestId;
   }
 
   /**
