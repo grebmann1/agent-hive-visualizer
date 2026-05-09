@@ -20,23 +20,36 @@ sprite position so you can replay it and spot the offending step.
 
 ## Capture a log
 
+The motion log is **off by default** — it doesn't allocate when
+disabled, so leaving it off costs nothing. Turn it on only while
+you're actively chasing a bug.
+
 1. Open Agent Force HQ.
-2. Reproduce the teleport (run a real `claude` session, watch
+2. Click the **🐞 DEBUG** chip in the top-right corner of the
+   canvas (or press **Shift+D**).
+3. Toggle **AGENT MOTION LOG** to ON. The chip turns into 🔴 LOG
+   to remind you recording is live.
+4. Reproduce the teleport (run a real `claude` session, watch
    until the agent jumps).
-3. Press **Shift+E** anywhere outside an input field.
-4. Browser saves `agent-log-<ISO-timestamp>.json` to your
+5. Open the debug panel again and click **▼ EXPORT JSON**, OR
+   press **Shift+E** anywhere outside an input field.
+6. Browser saves `agent-log-<ISO-timestamp>.json` to your
    Downloads folder.
+7. Toggle the log OFF afterward; the buffer is freed.
 
-The log is a ring buffer of the last 5,000 entries — older events
-are overwritten, so capture promptly after seeing the bug.
+The setting persists across reloads (stored in localStorage), so
+if you forget it stays on, the chip will keep showing 🔴 to remind
+you.
 
-You can also trigger the export from DevTools:
+You can also drive the log from DevTools:
 
 ```js
-window.agentLog.download()
+window.agentLog.setEnabled(true)
 window.agentLog.size()      // current entry count
 window.agentLog.snapshot()  // returns the array directly
+window.agentLog.download()
 window.agentLog.clear()
+window.agentLog.setEnabled(false)
 ```
 
 ---

@@ -19,7 +19,8 @@ const SHORTCUTS: Array<{ keys: string; label: string }> = [
   { keys: "⌘`", label: "Switch focus between game and terminal" },
   { keys: "L", label: "Toggle event log in sidebar" },
   { keys: "D", label: "Toggle debug overlay (object borders + agent anchors)" },
-  { keys: "Shift+E", label: "Export agent motion log (JSON download — for teleport debugging)" },
+  { keys: "Shift+D", label: "Open debug panel (toggle motion log, export, clear)" },
+  { keys: "Shift+E", label: "Export agent motion log (when recording is on)" },
   { keys: "?", label: "Show this shortcut list" },
 ];
 

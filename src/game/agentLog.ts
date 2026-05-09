@@ -58,7 +58,41 @@ export interface AgentLogEntry {
 
 const buf: AgentLogEntry[] = [];
 
+// Off by default. Toggled from the in-app Debug panel (which mirrors
+// the value to localStorage so it survives reloads). When disabled,
+// `logAgent` is a no-op — no allocation, no buffer growth.
+const STORAGE_KEY = "agentquest:agentlog:enabled";
+let enabled = false;
+
+if (typeof window !== "undefined") {
+  try {
+    enabled = window.localStorage.getItem(STORAGE_KEY) === "1";
+  } catch {
+    // localStorage may be unavailable (private mode, etc.) — leave off.
+  }
+}
+
+export function isEnabled(): boolean {
+  return enabled;
+}
+
+export function setEnabled(next: boolean): void {
+  enabled = next;
+  if (typeof window !== "undefined") {
+    try {
+      window.localStorage.setItem(STORAGE_KEY, next ? "1" : "0");
+    } catch {
+      // ignore
+    }
+  }
+  if (!next) {
+    // Free the buffer when the user disables logging.
+    buf.length = 0;
+  }
+}
+
 export function logAgent(entry: AgentLogEntry): void {
+  if (!enabled) return;
   buf.push(entry);
   // Cheap ring-buffer trim. We tolerate a one-frame window where
   // length > CAP because the splice cost of trimming on every push
@@ -111,5 +145,7 @@ if (typeof window !== "undefined") {
     download,
     clear,
     size,
+    isEnabled,
+    setEnabled,
   };
 }

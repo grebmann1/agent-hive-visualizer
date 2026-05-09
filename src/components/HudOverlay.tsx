@@ -3,16 +3,54 @@
 import { useEffect, useState } from "react";
 import { useGameStore } from "../stores/useGameStore";
 import { useToastStore } from "../stores/useToastStore";
+import DebugPanel from "./DebugPanel";
+import { isEnabled as agentLogEnabled } from "../game/agentLog";
 
 // HUD — compact overlays rendered INSIDE the game panel (it's the relative
 // container). Only the controls hint + transient toasts live here in v2.0.
 // The live-status chip and terminal toggle live elsewhere in MainSplit.
 export default function HudOverlay() {
   const dialogActive = useGameStore((s) => s.dialog.active);
+  const [debugOpen, setDebugOpen] = useState(false);
+  // Re-render every couple seconds while the panel is closed so the
+  // tiny 🐞 chip can show whether logging is currently recording.
+  const [recording, setRecording] = useState(agentLogEnabled());
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.shiftKey && (e.key === "D" || e.key === "d")) {
+        const t = e.target as HTMLElement | null;
+        if (t?.tagName === "INPUT" || t?.tagName === "TEXTAREA") return;
+        e.preventDefault();
+        setDebugOpen((v) => !v);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  // Refresh the recording indicator when the panel closes (the user
+  // may have just toggled the switch).
+  useEffect(() => {
+    if (debugOpen) return;
+    setRecording(agentLogEnabled());
+  }, [debugOpen]);
 
   return (
     <>
       {!dialogActive && <ControlsHint />}
+      {!dialogActive && (
+        <button
+          type="button"
+          onClick={() => setDebugOpen(true)}
+          className="hud-chip hud-chip-interactive absolute top-2 right-2 z-20"
+          title="Debug tools (Shift+D)"
+          style={{ fontSize: 10 }}
+        >
+          {recording ? "🔴 LOG" : "🐞 DEBUG"}
+        </button>
+      )}
+      <DebugPanel open={debugOpen} onClose={() => setDebugOpen(false)} />
       <ToastSlot />
     </>
   );
