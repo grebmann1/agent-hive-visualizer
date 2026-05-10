@@ -496,7 +496,6 @@ export class WorldScene extends Phaser.Scene {
     }
 
     this.drawMap();
-    this.drawRoomLabels();
     this.createAnims();
     this.createNpcs();
     this.setupMouseInput();
@@ -1009,61 +1008,6 @@ export class WorldScene extends Phaser.Scene {
     return isWalkableIn(this.zone, col, row);
   }
 
-  // Empty-state hints — one Phaser Text per room, painted at the room's
-  // anchor cell. Only drawn while no dynamic NPC is present so they
-  // don't compete with sprites once activity starts. Built once at
-  // create() and shown/hidden in tickEmptyStateHints().
-  private emptyStateLabels: Phaser.GameObjects.Text[] = [];
-
-  private drawRoomLabels() {
-    // Build the empty-state labels. They start hidden; the per-frame
-    // tickEmptyStateHints toggles visibility based on dynamic-NPC count.
-    if (this.emptyStateLabels.length > 0) {
-      for (const t of this.emptyStateLabels) t.destroy();
-      this.emptyStateLabels = [];
-    }
-    const regions = getRoomRegions();
-    for (const r of regions) {
-      const room = roomById(r.id);
-      if (!room) continue;
-      const cx = ((r.colMin + r.colMax + 1) / 2) * TILE_SIZE;
-      const cy = ((r.rowMin + r.rowMax + 1) / 2) * TILE_SIZE;
-      const t = this.add
-        .text(cx, cy, room.label.toUpperCase(), {
-          fontFamily: '"Press Start 2P", monospace',
-          fontSize: "9px",
-          color: "#6ee7b7",
-          backgroundColor: "#0e1018",
-          padding: { x: 6, y: 3 },
-          resolution: 3,
-        })
-        .setOrigin(0.5, 0.5)
-        .setDepth(800)
-        .setAlpha(0);
-      this.emptyStateLabels.push(t);
-    }
-  }
-
-  /** Fade the empty-state room labels in/out based on whether any
-   *  dynamic agent is present. Cheap — runs each frame but only writes
-   *  alpha when it actually changes. */
-  private tickEmptyStateHints() {
-    if (this.emptyStateLabels.length === 0) return;
-    const dyn = useNpcStore.getState().dynamic;
-    const hasAgents = Object.keys(dyn).length > 0;
-    const targetAlpha = hasAgents ? 0 : 0.85;
-    for (const t of this.emptyStateLabels) {
-      const delta = targetAlpha - t.alpha;
-      if (Math.abs(delta) < 0.02) {
-        // Snap to target so labels actually settle at 0 / 0.85
-        // instead of asymptoting at ~0.019 forever.
-        if (t.alpha !== targetAlpha) t.setAlpha(targetAlpha);
-        continue;
-      }
-      // Smooth lerp during the transition.
-      t.setAlpha(t.alpha + delta * 0.15);
-    }
-  }
 
   // --------------------------------------------------------------------
   // animation setup — anim keys are scoped to the SHARED sheet, not the
@@ -1929,7 +1873,6 @@ export class WorldScene extends Phaser.Scene {
     this.tickChoreoDecay();
     this.tickFollowCamera();
     this.tickSpriteSeparation();
-    this.tickEmptyStateHints();
     this.tickOverheadPills();
     this.tickTransitBadges();
     this.idleAnimCtrl?.tick(this.time.now);
