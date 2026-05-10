@@ -1,7 +1,7 @@
 {
   "name": "agentquest",
   "productName": "Agent Force HQ",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "A 2D pixel-art world where every AI agent becomes a visible character. Monitors local Claude CLI processes in real time.",
   "author": "Agent Force HQ",
   "main": "electron/main.js",
