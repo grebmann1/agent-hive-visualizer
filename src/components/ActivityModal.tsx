@@ -142,15 +142,23 @@ export default function ActivityModal() {
       onClick={close}
     >
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="activity-modal-title"
         className="dialog-box w-[min(92vw,560px)]"
         onClick={(e) => e.stopPropagation()}
+        style={{ animation: "dialogIn 180ms ease" }}
       >
         <div className="flex items-center justify-between mb-2">
-          <h2 className="pixel-font text-[13px] text-accent-dark">
+          <h2
+            id="activity-modal-title"
+            className="pixel-font text-[13px] text-accent"
+          >
             ◆ ACTIVITY · {(npc?.name ?? npcId ?? "").toUpperCase()}
           </h2>
           <button
             type="button"
+            aria-label="Close dialog"
             onClick={close}
             className="pixel-font text-[9px] text-ink-soft hover:text-ink underline"
           >
@@ -282,7 +290,7 @@ export default function ActivityModal() {
               const borderColor = isError
                 ? "#ef4444"
                 : isResult || isSubagentDone
-                  ? "#22c55e"
+                  ? "#6ee7b7"
                   : undefined;
               const marker = isError
                 ? "✕"
@@ -380,7 +388,7 @@ export default function ActivityModal() {
                     {marker && (
                       <span
                         className="pixel-font text-[10px]"
-                        style={{ color: isError ? "#ef4444" : "#22c55e" }}
+                        style={{ color: isError ? "#ef4444" : "#6ee7b7" }}
                       >
                         {marker}
                       </span>

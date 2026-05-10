@@ -132,7 +132,9 @@ export default function QuickStartModal({
     const title = cwd.split("/").filter(Boolean).pop() || "shell";
     const id = await openTerminal({ cwd, title });
     if (!id) {
-      setError("Could not spawn a terminal. Is Electron running?");
+      setError(
+        "Could not start a terminal. Try restarting Agent Force HQ — if the problem persists, report at github.com/grebmann1/agent-hive-visualizer/issues.",
+      );
       setBusy(false);
       return;
     }
@@ -154,15 +156,23 @@ export default function QuickStartModal({
       onClick={onClose}
     >
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="quickstart-modal-title"
         className="dialog-box w-[min(92vw,520px)]"
         onClick={(e) => e.stopPropagation()}
+        style={{ animation: "dialogIn 180ms ease" }}
       >
         <div className="flex items-center justify-between mb-3">
-          <h2 className="pixel-font text-[13px] text-accent-dark">
+          <h2
+            id="quickstart-modal-title"
+            className="pixel-font text-[13px] text-accent"
+          >
             ◆ NEW AGENT
           </h2>
           <button
             type="button"
+            aria-label="Close dialog"
             onClick={onClose}
             className="pixel-font text-[9px] text-ink-soft hover:text-ink underline"
           >
@@ -180,7 +190,7 @@ export default function QuickStartModal({
                 value={cwd}
                 onChange={(e) => setCwd(e.target.value)}
                 placeholder="/Users/you/code/my-repo"
-                className="flex-1 bg-paper-dim border-2 border-ink rounded px-2 py-1.5 text-[12px] outline-none focus:bg-paper font-mono"
+                className="flex-1 bg-paper-dim border-2 border-ink rounded px-2 py-1.5 text-[12px] focus:ring-2 focus:ring-[var(--accent)] focus:bg-paper font-mono"
               />
               <button
                 type="button"
@@ -264,7 +274,7 @@ export default function QuickStartModal({
               type="button"
               onClick={launch}
               disabled={busy || !cwd}
-              className="pixel-font text-[9px] px-3 py-2 rounded border-2 border-ink bg-accent text-paper-dim hover:bg-accent-dark hover:text-paper-dim tracking-wide disabled:opacity-40 disabled:cursor-not-allowed"
+              className="pixel-font text-[9px] px-3 py-2 rounded border-2 border-ink bg-accent text-paper-dim hover:bg-[#c9a959] hover:text-paper-dim tracking-wide disabled:opacity-40 disabled:cursor-not-allowed"
             >
               {busy ? "STARTING…" : "▸ LAUNCH"}
             </button>

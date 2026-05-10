@@ -135,17 +135,23 @@ export const useAgentStore = create<AgentStoreState>((set) => ({
         : undefined;
 
     // Sticky error: any tool_result with isError, plus dedicated
-    // agent.error events. The chip persists until clearError() is
-    // called (typically when the user opens the activity modal).
-    const errorMeta =
+    // agent.error events. Cleared when the agent moves on to a new
+    // action (a fresh tool_use or successful tool_result), or when
+    // the user opens the activity modal.
+    const eventIsError =
       (event.type === "agent.tool.result" &&
         (event.metadata as { isError?: boolean } | undefined)?.isError) ||
-      event.type === "agent.error"
-        ? {
-            message: event.message || "Tool error",
-            at: Date.now(),
-          }
-        : undefined;
+      event.type === "agent.error";
+    const errorMeta = eventIsError
+      ? { message: event.message || "Tool error", at: Date.now() }
+      : undefined;
+    // A new non-error action means the agent has moved on — drop the
+    // stale error chip. Tool-use starts a new action; a successful
+    // tool-result completes one.
+    const clearsStaleError =
+      !eventIsError &&
+      (event.type === "agent.tool.called" ||
+        event.type === "agent.tool.result");
 
     // "Passive" events — tool_result (success), text turn-end, thinking —
     // shouldn't yank the NPC out of the tool's room back to the desk.
@@ -204,7 +210,12 @@ export const useAgentStore = create<AgentStoreState>((set) => ({
           : s.thinkingByAgent,
         errorByAgent: errorMeta
           ? { ...s.errorByAgent, [event.agentId]: errorMeta }
-          : s.errorByAgent,
+          : clearsStaleError && s.errorByAgent[event.agentId]
+            ? (() => {
+                const { [event.agentId]: _gone, ...rest } = s.errorByAgent;
+                return rest;
+              })()
+            : s.errorByAgent,
         eventsByAgent: {
           ...s.eventsByAgent,
           [event.agentId]: nextAgentEvents,

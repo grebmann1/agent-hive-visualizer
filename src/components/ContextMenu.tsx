@@ -74,13 +74,20 @@ export default function ContextMenu() {
       if (e.key === "Escape") close();
     };
     const onScroll = () => close();
+    // Wheel-zooming the canvas or alt-tabbing to another window also feels
+    // like the user is "moving on" — close in those cases too.
+    const onWheelOrBlur = () => useContextMenuStore.getState().close();
     window.addEventListener("mousedown", onDown, true);
     window.addEventListener("keydown", onKey);
     window.addEventListener("scroll", onScroll, true);
+    window.addEventListener("wheel", onWheelOrBlur, { capture: true, passive: true });
+    window.addEventListener("blur", onWheelOrBlur);
     return () => {
       window.removeEventListener("mousedown", onDown, true);
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("wheel", onWheelOrBlur, { capture: true } as EventListenerOptions);
+      window.removeEventListener("blur", onWheelOrBlur);
     };
   }, [open, close]);
 
@@ -99,7 +106,7 @@ export default function ContextMenu() {
     <>
       {targetName && (
         <div
-          className="pixel-font text-[10px] px-3 py-1.5 text-accent-dark tracking-wide border-b-2 border-ink mb-1 truncate"
+          className="pixel-font text-[10px] px-3 py-1.5 text-accent tracking-wide border-b-2 border-ink mb-1 truncate"
           title={targetName}
         >
           ◆ {targetName.toUpperCase()}

@@ -120,7 +120,7 @@ function EventRow({
   if (event.type === "agent.tool.result") {
     const isError = !!meta.isError;
     const body = (meta.resultText ?? event.message ?? "").slice(0, 160);
-    const color = isError ? "#ef4444" : "#22c55e";
+    const color = isError ? "#ef4444" : "#6ee7b7";
     const marker = isError ? "✗" : "✓";
     return (
       <div
@@ -158,7 +158,7 @@ function EventRow({
   ) {
     return (
       <div className="text-[13px] leading-[1.55] text-ink">
-        <span className="pixel-font text-[10px] text-accent-dark mr-1.5 tracking-wide">
+        <span className="pixel-font text-[10px] text-accent mr-1.5 tracking-wide">
           ◆ {agentName.toUpperCase()}
         </span>
         {event.message}

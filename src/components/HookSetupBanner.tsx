@@ -54,6 +54,15 @@ export default function HookSetupBanner() {
     refresh();
   }, [refresh]);
 
+  useEffect(() => {
+    if (!showExplainer) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setShowExplainer(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [showExplainer]);
+
   const install = async () => {
     setStatus({ kind: "installing" });
     const bridge = window.agentquest;
@@ -74,7 +83,9 @@ export default function HookSetupBanner() {
     }
     setStatus({
       kind: "error",
-      message: res.error ?? "Install failed for an unknown reason.",
+      message:
+        res.error ??
+        "Install failed. Try Open settings.json and re-run, or restart Agent Force HQ.",
     });
   };
 
@@ -95,62 +106,72 @@ export default function HookSetupBanner() {
 
   return (
     <>
-      <div className="panel-dark px-4 py-3 flex items-center gap-4 text-[12px]">
-        <div className="pixel-font text-[11px] text-accent tracking-wide">
-          ◆ LIVE HOOKS NOT INSTALLED
+      <div className="absolute top-0 left-0 right-0 z-[90] panel px-5 py-3 flex items-center gap-5 text-[12px] shadow-lg">
+        <div className="flex items-center gap-3 shrink-0">
+          <span className="text-[18px] leading-none">📡</span>
+          <div>
+            <div className="pixel-font text-[11px] text-accent-dark tracking-wide leading-tight">
+              NOT CONNECTED
+            </div>
+            <div className="text-[11px] text-ink-soft leading-tight mt-0.5">
+              Live hooks inactive
+            </div>
+          </div>
         </div>
-        <div className="flex-1 opacity-90">
-          Agent Force HQ hasn&apos;t wired itself into Claude yet. Install hooks
-          to stream every agent event in real-time — no polling, no truncation.
+        <div className="flex-1 text-ink-soft text-[12px] leading-snug">
+          Install hooks to see every Claude session in real-time.
+          Everything stays local — no network traffic.
         </div>
         {status.kind === "offer" && (
-          <>
+          <div className="flex items-center gap-2 shrink-0">
             <button
               type="button"
               onClick={install}
-              className="pixel-font text-[10px] px-3 py-2 rounded border-2 border-ink bg-accent text-paper-dim hover:bg-accent-dark hover:text-paper-dim tracking-wide"
+              className="btn text-[10px] px-4 py-2"
             >
               INSTALL HOOKS
             </button>
             <button
               type="button"
               onClick={dismiss}
-              className="pixel-font text-[10px] px-2 py-1 opacity-60 hover:opacity-100 tracking-wide"
+              className="btn-ghost pixel-font text-[10px] px-3 py-2 rounded border-2 border-[var(--border)] opacity-70 hover:opacity-100"
             >
-              NOT NOW
+              LATER
             </button>
             <button
               type="button"
               onClick={() => setShowExplainer(true)}
-              className="pixel-font text-[10px] px-2 py-1 opacity-70 hover:opacity-100 underline tracking-wide"
+              className="pixel-font text-[10px] px-2 py-1.5 text-ink-soft hover:text-ink underline decoration-dotted underline-offset-2"
             >
-              WHAT DOES THIS DO?
+              LEARN MORE
             </button>
-          </>
+          </div>
         )}
         {status.kind === "installing" && (
-          <div className="pixel-font text-[10px] opacity-70">INSTALLING…</div>
+          <div className="pixel-font text-[10px] text-accent flex items-center gap-2 shrink-0">
+            <span className="inline-block animate-spin">◇</span> INSTALLING…
+          </div>
         )}
         {status.kind === "error" && (
-          <>
-            <div className="text-[11px] text-red-300 italic max-w-[40%] truncate">
+          <div className="flex items-center gap-2 shrink-0">
+            <div className="text-[11px] text-red-400 max-w-[220px] truncate">
               {status.message}
             </div>
             <button
               type="button"
               onClick={openSettings}
-              className="pixel-font text-[10px] px-2 py-1 rounded border-2 border-ink bg-paper-dim tracking-wide"
+              className="btn-ghost pixel-font text-[10px] px-3 py-2 rounded border-2 border-[var(--border)]"
             >
-              OPEN SETTINGS.JSON
+              OPEN SETTINGS
             </button>
             <button
               type="button"
               onClick={() => setStatus({ kind: "offer" })}
-              className="pixel-font text-[10px] px-2 py-1 opacity-70 hover:opacity-100 tracking-wide"
+              className="pixel-font text-[10px] px-2 py-1.5 text-ink-soft hover:text-ink underline"
             >
               RETRY
             </button>
-          </>
+          </div>
         )}
       </div>
 
@@ -160,15 +181,23 @@ export default function HookSetupBanner() {
           onClick={() => setShowExplainer(false)}
         >
           <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="hooksetup-explainer-title"
             className="dialog-box w-[min(92vw,520px)]"
             onClick={(e) => e.stopPropagation()}
+            style={{ animation: "dialogIn 180ms ease" }}
           >
             <div className="flex items-center justify-between mb-3">
-              <h2 className="pixel-font text-[13px] text-accent-dark">
+              <h2
+                id="hooksetup-explainer-title"
+                className="pixel-font text-[13px] text-accent"
+              >
                 ◆ WHAT AGENT FORCE HQ INSTALLS
               </h2>
               <button
                 type="button"
+                aria-label="Close dialog"
                 onClick={() => setShowExplainer(false)}
                 className="pixel-font text-[9px] text-ink-soft hover:text-ink underline"
               >
@@ -177,7 +206,14 @@ export default function HookSetupBanner() {
             </div>
             <ul className="text-[13px] leading-relaxed list-disc pl-5 space-y-2">
               <li>
-                Adds six hook entries to{" "}
+                Everything stays on your machine. Each hook POSTs to{" "}
+                <code className="text-[12px] px-1 bg-paper-dim border border-ink rounded">
+                  http://127.0.0.1:47329
+                </code>{" "}
+                — loopback only. No outbound network traffic.
+              </li>
+              <li>
+                Adds the hook entries Agent Force HQ needs to{" "}
                 <code className="text-[12px] px-1 bg-paper-dim border border-ink rounded">
                   ~/.claude/settings.json
                 </code>{" "}
@@ -190,13 +226,6 @@ export default function HookSetupBanner() {
                   ~/.agentquest/bin/post-hook.sh
                 </code>
                 .
-              </li>
-              <li>
-                Each hook POSTs to{" "}
-                <code className="text-[12px] px-1 bg-paper-dim border border-ink rounded">
-                  http://127.0.0.1:47329
-                </code>{" "}
-                — loopback only. No outbound network traffic.
               </li>
               <li>
                 A one-time backup of your existing settings is saved to{" "}

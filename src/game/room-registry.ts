@@ -68,6 +68,13 @@ export const ROOMS: RoomDef[] = [
       "Stand-up + sub-agent handoffs. Where agents go when they delegate to a helper.",
     tags: ["meeting", "task", "subagent"],
   },
+  {
+    id: "lounge",
+    label: "Coffee Bar",
+    description:
+      "Idle hangout. Where agents wander when nothing's happening.",
+    tags: ["idle", "lounge", "coffee", "break"],
+  },
 ];
 
 export function roomById(id: RoomId): RoomDef | undefined {

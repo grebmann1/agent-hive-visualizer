@@ -59,7 +59,7 @@ export default function Intro() {
   return (
     <div className="hud-chip hud-chip-interactive fixed top-12 left-1/2 -translate-x-1/2 z-30 flex items-center gap-3">
       <div className="flex flex-col gap-0.5">
-        <div className="pixel-font text-[10px] text-accent-dark">
+        <div className="pixel-font text-[10px] text-accent">
           ◆ WELCOME TO AGENT FORCE HQ
         </div>
         <div className="pixel-font text-[9px] text-ink-soft">

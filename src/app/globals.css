@@ -17,6 +17,26 @@
   --border: #2a3150;
 }
 
+/* Keyboard focus ring — scoped to interactive elements only so the
+   ring doesn't bleed onto the canvas wrapper or the body. Uses gold
+   to stay clear of the in-game greens. */
+button:focus-visible,
+a:focus-visible,
+[role="button"]:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+[tabindex]:not([tabindex="-1"]):focus-visible {
+  outline: 2px solid #c9a959;
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+.btn:focus-visible,
+.hud-chip:focus-visible,
+.dialog-box button:focus-visible {
+  outline-offset: 3px;
+}
+
 @theme inline {
   --color-gb-darkest: var(--gb-darkest);
   --color-gb-dark: var(--gb-dark);
@@ -58,7 +78,7 @@ canvas,
   border: 2px solid var(--border);
   border-radius: 6px;
   box-shadow: 2px 2px 0 var(--border), 0 0 0 4px var(--paper-dim) inset;
-  padding: 8px 10px;
+  padding: 14px 16px;
   position: relative;
 }
 
@@ -171,7 +191,7 @@ canvas,
 
 /* App-wide textured paper background */
 .bg-page {
-  background-color: #271d2e;
+  background-color: var(--paper-dim);
   background-image:
     radial-gradient(rgba(255, 255, 255, 0.05) 1px, transparent 1px),
     radial-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px);
@@ -179,24 +199,12 @@ canvas,
   background-position: 0 0, 2px 2px;
 }
 
-/* Top title bar — flat dark to match the rest of the dark UI; thin
-   accent underline reads as a "scanline" without the muddy gradient. */
+/* Top title bar — flat dark to match the rest of the dark UI. */
 .title-strip {
   background: var(--paper-dim);
   color: var(--ink);
-  border-bottom: 2px solid var(--accent-dark);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
   box-shadow: inset 0 -1px 0 rgba(255, 255, 255, 0.04);
-}
-
-/* HUD marquee — used by the controls hint chip so the available
-   actions roll past instead of crowding the BR corner. */
-@keyframes hudMarquee {
-  0% {
-    transform: translateX(0);
-  }
-  100% {
-    transform: translateX(-50%);
-  }
 }
 
 @keyframes fadeIn {
@@ -210,11 +218,43 @@ canvas,
   }
 }
 
+@keyframes fadeOut {
+  from {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+  to {
+    opacity: 0;
+    transform: translate(-50%, 4px);
+  }
+}
+
+@keyframes dialogIn {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Agent roster row — subtle hover lift so the click affordance reads
+   without being noisy. Background transition mirrors the existing
+   Tailwind hover:bg-paper-dim/60 timing. */
+.agent-row {
+  transition: transform 80ms ease, background-color 120ms ease;
+}
+.agent-row:hover {
+  transform: translateY(-1px);
+}
+
 /* Dialog box — like a Pokemon text window but readable */
 .dialog-box {
   background: var(--paper);
   color: var(--ink);
-  border: 3px solid var(--border);
+  border: 2px solid var(--border);
   border-radius: 8px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
   padding: 18px 20px 14px;

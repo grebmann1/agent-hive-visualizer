@@ -12,14 +12,13 @@ import {
   PROMPT_EMOJI,
 } from "../events/stateToRoom";
 import { useAgentStore } from "../stores/useAgentStore";
-import { useActivityModalStore } from "../stores/useActivityModalStore";
 import { useGameStore } from "../stores/useGameStore";
 import { buildLiveGreeting, useNpcStore } from "../stores/useNpcStore";
 import { useWorldBus } from "../stores/useWorldBus";
 import { GB, TILE_SIZE } from "./palette";
 import { type NpcDef } from "./npcs";
 import { bfs } from "./pathfind";
-import { ROOM_ANCHORS, getRoomRegions } from "./rooms";
+import { ROOM_ANCHORS, getRoomRegions, roomIdForCell } from "./rooms";
 import { roomById } from "./room-registry";
 import {
   EXTERIOR_ANCHORS,
@@ -27,13 +26,38 @@ import {
   loadInteriorZone,
   type ZoneDef,
 } from "./zones";
-import { resolveGid, type SeatCell } from "./tiled-loader";
+import { resolveGid, type DeskRect, type SeatCell } from "./tiled-loader";
 import { download as downloadAgentLog, logAgent, size as agentLogSize } from "./agentLog";
 import {
   type ChoreoHandle,
   type ChoreoKind,
   startChoreo,
 } from "./choreo";
+import { useSettingsStore } from "../stores/useSettingsStore";
+import { WORLD_LIFE_TUNABLES } from "./world-life/tunables";
+import {
+  formatTransitionLog,
+  makeCooldowns,
+  microCooldown,
+  nextState as worldLifeNextState,
+  setMicroCooldown,
+  setSigCooldown,
+  sigCooldown,
+  snapshotCooldownsS,
+  worldLifeDebug,
+  type WorldLifeState,
+  type WorldLifeTrigger,
+} from "./world-life/state-machine";
+import { IdleAnimController, type IdleContextProvider } from "./world-life/idle-anims";
+import {
+  startLoungeSignature,
+  type LoungeSignatureHandle,
+  type PersistedMugHandle,
+} from "./world-life/lounge-signature";
+import { DwellTracker } from "./world-life/dwell-ladder";
+import { startMicroTrip, type MicroTripHandle } from "./world-life/micro-trip";
+import { ChitChatEngine, type ChatSession, type AgentMood, chatProbForRoom } from "./world-life/chit-chat-engine";
+import { showChatBubble, bubbleSide, type ChatBubbleHandle } from "./world-life/chat-bubble";
 
 type Direction = "down" | "up" | "left" | "right";
 
@@ -101,15 +125,6 @@ const IDLE_FRAME = {
   right: [18, 19, 20, 21],
 } as const;
 
-// First frame per direction in the sit sheet — used as a static pose
-// when an idle agent claims a seat.
-const SIT_FRAME = {
-  down: 0,
-  up: 6,
-  left: 12,
-  right: 18,
-} as const;
-
 // Camera control constants (v2.0 free-pan mode).
 const DRAG_THRESHOLD_PX = 4;
 const ZOOM_MIN = 1;
@@ -170,17 +185,6 @@ interface Entity {
   helper?: HelperSprite;
   // Floating "HELPER" badge above sub-agent sprites (parented NPCs only).
   helperBadge?: Phaser.GameObjects.Text;
-  // Floating thinking excerpt — appears below the pill while
-  // `thinkingByAgent[id]` has fresh content. Long text scrolls
-  // marquee-style inside a fixed-width clipped container so the user
-  // sees the full message over time. Auto-fades after TTL of no
-  // updates so a stale "thinking..." line doesn't sit there forever.
-  // Static "INSTRUCTIONS" chip floating below the pill while the agent
-  // has fresh thinking content. Click to open the activity modal,
-  // which shows the full thinking + tool log.
-  thinkingBadge?: Phaser.GameObjects.Text;
-  thinkingText?: string;
-  thinkingUpdatedAt?: number;
   // Where this NPC is currently walking. Set by walkNpcToRoom and
   // cleared once the path drains; read by the transit indicator badge.
   transitTarget?: RoomId;
@@ -282,6 +286,44 @@ export class WorldScene extends Phaser.Scene {
   // Counter-state for each summon tick so we only act on increments.
   private lastSeenSummonTicks: Record<string, number> = {};
 
+  // ------------------------------------------------------------------
+  // World-life v2 (spec §2 + §9) — Stage 1, behind `worldLifeV2` flag.
+  // The timer is created lazily once the flag is on; with the flag off
+  // none of these are touched, so behaviour stays byte-identical to
+  // pre-v2. Visual side effects come in later tickets (#241/238/237/240).
+  // ------------------------------------------------------------------
+  private worldLifeTimer: Phaser.Time.TimerEvent | null = null;
+  private idleAnimCtrl: IdleAnimController | null = null;
+  private unsubscribeSettings: (() => void) | null = null;
+  /** Wall-clock ms (Date.now()) the NPC last received a tool event.
+   *  Used to drive the ACTIVE_TOOL → ROOM_IDLE transition after
+   *  TOOL_QUIET_S. Separate from `lastActivityAt` (scene clock, used by
+   *  the existing cinema loop) so the FSM can stand on its own clock. */
+  private worldLifeLastToolAt = new Map<string, number>();
+
+  // ------------------------------------------------------------------
+  // World-life Stage 2 — lounge signature visual state
+  // ------------------------------------------------------------------
+  /** Active lounge-signature handle per NPC. Present while the ritual is
+   *  in flight; removed when the sequence finishes or is preempted. */
+  private loungeSignatures = new Map<string, LoungeSignatureHandle>();
+  /** Persisted mug overlays per NPC — active when the agent left the
+   *  lounge but the mug hasn't decayed yet (10s window). */
+  private persistedMugs = new Map<string, PersistedMugHandle>();
+
+  // ------------------------------------------------------------------
+  // World-life Stage 4 — dwell ladder + micro-trips
+  // ------------------------------------------------------------------
+  private dwellTracker: DwellTracker | null = null;
+  private microTrips = new Map<string, MicroTripHandle>();
+
+  // ------------------------------------------------------------------
+  // World-life Stage 5 — chit-chat engine + bubble rendering
+  // ------------------------------------------------------------------
+  private chatEngine: ChitChatEngine | null = null;
+  private activeBubbles = new Map<string, ChatBubbleHandle>(); // npcId → bubble
+  private chatAdvanceTimers = new Map<number, Phaser.Time.TimerEvent>(); // sessionId → next-advance timer
+
   constructor() {
     super("WorldScene");
   }
@@ -309,13 +351,13 @@ export class WorldScene extends Phaser.Scene {
         `/assets/sprites/modern/${c}_idle_anim_16x16.png`,
         { frameWidth: 16, frameHeight: 32 },
       );
-      // Sit sheet — `*_sit3_16x16.png` is the front-facing seated
-      // variant (eyes toward the camera) so a player can see who's at
-      // the desk. The other sit*_16x16 sheets show the character from
-      // behind / from the side and read as "agent has turned away".
+      // Sit sheet — directional 24-frame variant (6 frames per
+      // direction, same layout as the run/idle sheets). Indexing via
+      // SIT_FRAME[npc.facing] picks the back/side/front pose so a
+      // seated agent faces their desk instead of the camera.
       this.load.spritesheet(
         MODERN_SIT_KEY(c),
-        `/assets/sprites/modern/${c}_sit3_16x16.png`,
+        `/assets/sprites/modern/${c}_sit_16x16.png`,
         { frameWidth: 16, frameHeight: 32 },
       );
     }
@@ -403,6 +445,7 @@ export class WorldScene extends Phaser.Scene {
     // Cache the authored seat cells so claimFreeSeat / tickIdleSit / the
     // post-spawn flow can look them up without re-reading the manifest.
     this.seatCells = bundle.parsed.seatCells.slice();
+    this.deskRects = bundle.parsed.deskRects.slice();
     // Snapshot the raw Tiled objects so the debug overlay can outline
     // every authored rect (rooms, seats, decor, collision) without
     // re-fetching the .tmj.
@@ -459,6 +502,7 @@ export class WorldScene extends Phaser.Scene {
     this.setupMouseInput();
     this.subscribeStores();
     this.startIdleSitLoop();
+    this.subscribeWorldLifeFlag();
     this.createTimeOfDayOverlay(mapW, mapH);
     this.createRoomAmbience();
 
@@ -526,6 +570,28 @@ export class WorldScene extends Phaser.Scene {
       this.unsubscribeGame = null;
       this.idleSitTimer?.destroy();
       this.idleSitTimer = null;
+      this.worldLifeTimer?.destroy();
+      this.worldLifeTimer = null;
+      this.idleAnimCtrl?.destroy();
+      this.idleAnimCtrl = null;
+      for (const h of this.loungeSignatures.values()) h.stop();
+      this.loungeSignatures.clear();
+      for (const h of this.persistedMugs.values()) h.destroy();
+      this.persistedMugs.clear();
+      this.dwellTracker?.destroy();
+      this.dwellTracker = null;
+      for (const h of this.microTrips.values()) h.stop();
+      this.microTrips.clear();
+      // Stage 5: destroy chat engine + bubbles + timers on shutdown
+      this.chatEngine?.destroy();
+      this.chatEngine = null;
+      for (const b of this.activeBubbles.values()) b.destroy();
+      this.activeBubbles.clear();
+      for (const t of this.chatAdvanceTimers.values()) t.remove(false);
+      this.chatAdvanceTimers.clear();
+      this.unsubscribeSettings?.();
+      this.unsubscribeSettings = null;
+      this.worldLifeLastToolAt.clear();
       // Clear all scene-local state. scene.restart() reuses the same
       // instance so class-field maps persist across restarts — an old
       // walk path targeting a now-destroyed sprite crashes tickNpcPaths.
@@ -549,6 +615,39 @@ export class WorldScene extends Phaser.Scene {
   // empty until then so claimFreeSeat is a no-op pre-load. The 60s-idle
   // cinema loop and the post-spawn assignment both walk this list.
   private seatCells: SeatCell[] = [];
+  // Cell-coord bounds of every "Desk" object — read at seat-snap time
+  // so a seated agent faces the nearest desk instead of the camera.
+  private deskRects: DeskRect[] = [];
+
+  /** Pick which way a seated agent should face. We look for the
+   *  nearest desk rect to the seat cell and return up/down/left/right
+   *  based on the dominant axis. Falls back to "up" (the dominant
+   *  layout in the authored map) when no desks exist. */
+  private deskFacingFor(col: number, row: number): Direction {
+    if (this.deskRects.length === 0) return "up";
+    const cx = col + 0.5;
+    const cy = row + 0.5;
+    let best: DeskRect | null = null;
+    let bestDist = Infinity;
+    for (const d of this.deskRects) {
+      const dcx = (d.colMin + d.colMax + 1) / 2;
+      const dcy = (d.rowMin + d.rowMax + 1) / 2;
+      const dx = dcx - cx;
+      const dy = dcy - cy;
+      const dist = dx * dx + dy * dy;
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = d;
+      }
+    }
+    if (!best) return "up";
+    const dcx = (best.colMin + best.colMax + 1) / 2;
+    const dcy = (best.rowMin + best.rowMax + 1) / 2;
+    const dx = dcx - cx;
+    const dy = dcy - cy;
+    if (Math.abs(dx) > Math.abs(dy)) return dx > 0 ? "right" : "left";
+    return dy > 0 ? "down" : "up";
+  }
 
   private startIdleSitLoop() {
     if (this.zone.id !== "interior") return;
@@ -659,9 +758,10 @@ export class WorldScene extends Phaser.Scene {
     if (useGameStore.getState().dialog.active) return;
     const now = this.time.now;
     // An NPC is "idle" if it hasn't had a real activity / summon / dialog
-    // interaction in the last minute. After that it heads to the cinema to
-    // chill until the player calls it again.
+    // interaction in the last minute. After that it heads to the lounge
+    // (coffee bar) to hang out until the player calls it again.
     const IDLE_MS = 60_000;
+    const loungeAvailable = !!this.zone.anchors.lounge;
 
     for (const npc of this.npcs.values()) {
       // Already mid-path? Leave them alone.
@@ -671,8 +771,19 @@ export class WorldScene extends Phaser.Scene {
       // Not idle long enough yet.
       const last = this.lastActivityAt.get(npc.def.id) ?? 0;
       if (last !== 0 && now - last < IDLE_MS) continue;
-      // Sub-agents follow their parent; don't drag them to the cinema.
+      // Sub-agents follow their parent; don't drag them to the lounge.
       if ((npc.def as { parentId?: string }).parentId) continue;
+
+      // Prefer routing idle agents to the lounge (coffee bar) — feels
+      // more alive than every agent silently snapping back to a desk.
+      // Fall back to a free seat if the map has no lounge anchor.
+      if (loungeAvailable) {
+        this.walkNpcToRoom(npc.def.id, "lounge");
+        if (!this.lastActivityAt.has(npc.def.id)) {
+          this.lastActivityAt.set(npc.def.id, now);
+        }
+        continue;
+      }
 
       const seat = this.claimFreeSeat(npc.def.id);
       if (!seat) continue;
@@ -808,19 +919,47 @@ export class WorldScene extends Phaser.Scene {
     }
     const path = bfs(npc.col, npc.row, targetCol, targetRow, { blocked });
     if (path.length <= 1) {
-      // Already there. Apply offset directly so a re-claim of the same
-      // tile still snaps the sprite onto the chair.
+      // Already in the target cell. Slide (don't snap) onto the chair's
+      // authored pixel center so the move reads as a step, not a
+      // teleport. Skip the tween if we're already on the offset.
       if (finalOffset) {
         const fromX = npc.sprite.x;
         const fromY = npc.sprite.y;
-        npc.sprite.setPosition(finalOffset.px, finalOffset.py);
-        npc.shadow.setPosition(finalOffset.px, finalOffset.py + 7);
-        npc.facing = "down";
-        try {
-          npc.sprite.stop();
-          npc.sprite.setFrame(FRAME.down[0]);
-        } catch {
-          // ignore
+        const dx = finalOffset.px - fromX;
+        const dy = finalOffset.py - fromY;
+        const facing = this.deskFacingFor(targetCol, targetRow);
+        npc.facing = facing;
+        const applySeatedPose = () => {
+          try {
+            npc.sprite.stop();
+            // Use the idle sheet's first frame for the chosen direction.
+            npc.sprite.setTexture(npc.idleAnimKey, IDLE_FRAME[facing][0]);
+          } catch {
+            // ignore
+          }
+        };
+        if (dx * dx + dy * dy < 0.25) {
+          // Sub-pixel difference — no tween needed.
+          applySeatedPose();
+        } else {
+          // Cancel any in-flight tween on this sprite to avoid a fight.
+          this.tweens.killTweensOf(npc.sprite);
+          this.tweens.killTweensOf(npc.shadow);
+          this.tweens.add({
+            targets: npc.sprite,
+            x: finalOffset.px,
+            y: finalOffset.py,
+            duration: STEP_DURATION_MS,
+            ease: "Linear",
+            onComplete: applySeatedPose,
+          });
+          this.tweens.add({
+            targets: npc.shadow,
+            x: finalOffset.px,
+            y: finalOffset.py + 7,
+            duration: STEP_DURATION_MS,
+            ease: "Linear",
+          });
         }
         logAgent({
           ts: Date.now(),
@@ -831,7 +970,7 @@ export class WorldScene extends Phaser.Scene {
           fromY,
           toX: finalOffset.px,
           toY: finalOffset.py,
-          note: "already-at-cell offset apply",
+          note: `already-at-cell offset slide (face ${facing})`,
         });
       }
       return;
@@ -1200,6 +1339,8 @@ export class WorldScene extends Phaser.Scene {
     // Paint the initial pill (resting state, idle emoji). We do this once
     // the entry is in the map so renderPill can reach it by id.
     this.renderPill(def.id);
+    this.idleAnimCtrl?.ensure(def.id);
+    this.dwellTracker?.ensure(def.id, Date.now());
 
     logAgent({
       ts: Date.now(),
@@ -1350,7 +1491,6 @@ export class WorldScene extends Phaser.Scene {
           npc.indicator?.destroy();
           npc.overheadContainer?.destroy();
           npc.helperBadge?.destroy();
-          npc.thinkingBadge?.destroy();
           npc.transitBadge?.destroy();
         },
       });
@@ -1367,9 +1507,35 @@ export class WorldScene extends Phaser.Scene {
     // Detach from npcs immediately so `update()` stops pinning the pill and
     // tick loops stop treating this as an active agent. The sprite stays
     // until the walk-out completes (we hold `npc` in closure).
+    this.idleAnimCtrl?.forget(id);
+    this.dwellTracker?.forget(id);
+    this.microTrips.get(id)?.stop();
+    this.microTrips.delete(id);
+    // Stage 5: interrupt any active chat session for this NPC
+    if (this.chatEngine) {
+      const session = this.chatEngine.getSessionFor(id);
+      if (session && !session.ended) {
+        this.chatEngine.interrupt(session.sessionId, id, Date.now());
+        this.endChatVisuals(session);
+        const partnerId = session.initiatorId === id ? session.partnerId : session.initiatorId;
+        if (worldLifeDebug.states[partnerId] === "CHIT_CHAT") {
+          this.applyWorldLifeTransition(partnerId, { name: "chitchat_complete" }, Date.now());
+        }
+      }
+    }
+    this.activeBubbles.get(id)?.destroy();
+    this.activeBubbles.delete(id);
+    this.loungeSignatures.get(id)?.stop();
+    this.loungeSignatures.delete(id);
+    this.persistedMugs.get(id)?.destroy();
+    this.persistedMugs.delete(id);
     this.npcs.delete(id);
     this.npcPaths.delete(id);
     this.npcSeatOffset.delete(id);
+    // World-life v2: drop the FSM entry so a later re-spawn starts
+    // clean. No-op when the flag is off (worldLifeDebug is empty).
+    worldLifeDebug.forget(id);
+    this.worldLifeLastToolAt.delete(id);
 
     if (shouldWalkOut) {
       // Drive the walk manually via two parallel tweens — the sprite and
@@ -1658,6 +1824,10 @@ export class WorldScene extends Phaser.Scene {
         // seat so the cinema loop doesn't re-herd them.
         this.lastActivityAt.set(agentId, this.time.now);
         this.releaseSeat(agentId);
+        // World-life v2: a real tool event preempts whatever the FSM
+        // was doing → ACTIVE_TOOL. Gated by the flag — the call is a
+        // no-op when v2 is off.
+        this.worldLifeOnToolEvent(agentId);
         this.walkNpcToRoom(agentId, act.room);
         const toolName = eventToolName(act.event);
         const isError =
@@ -1762,7 +1932,7 @@ export class WorldScene extends Phaser.Scene {
     this.tickEmptyStateHints();
     this.tickOverheadPills();
     this.tickTransitBadges();
-    this.tickThinkingBadges();
+    this.idleAnimCtrl?.tick(this.time.now);
     this.drawTethers();
     this.drawDebugOverlay();
   }
@@ -1877,6 +2047,37 @@ export class WorldScene extends Phaser.Scene {
       gfx.lineStyle(1, 0x000000, 0.8);
       gfx.strokeCircle(cx, cy, 4);
     }
+
+    // Seat → desk facing arrows. Yellow line from seat center pointing
+    // toward the desk the seated agent will face, with a chevron head.
+    const ARROW_LEN = 12;
+    const HEAD = 4;
+    for (const seat of this.seatCells) {
+      const facing = this.deskFacingFor(seat.col, seat.row);
+      const sx = seat.px;
+      const sy = seat.py;
+      const dx = facing === "left" ? -1 : facing === "right" ? 1 : 0;
+      const dy = facing === "up" ? -1 : facing === "down" ? 1 : 0;
+      const tx = sx + dx * ARROW_LEN;
+      const ty = sy + dy * ARROW_LEN;
+      gfx.lineStyle(2, 0xffe066, 1);
+      gfx.beginPath();
+      gfx.moveTo(sx, sy);
+      gfx.lineTo(tx, ty);
+      gfx.strokePath();
+      // Chevron head: two short segments perpendicular to the arrow.
+      const px = -dy;
+      const py = dx;
+      gfx.beginPath();
+      gfx.moveTo(tx, ty);
+      gfx.lineTo(tx - dx * HEAD + px * HEAD, ty - dy * HEAD + py * HEAD);
+      gfx.moveTo(tx, ty);
+      gfx.lineTo(tx - dx * HEAD - px * HEAD, ty - dy * HEAD - py * HEAD);
+      gfx.strokePath();
+      // Small dot at the seat origin for easy visual anchoring.
+      gfx.fillStyle(0xffe066, 1);
+      gfx.fillCircle(sx, sy, 2);
+    }
   }
 
   /** Keep the always-on overhead pill glued above its sprite every frame.
@@ -1926,72 +2127,6 @@ export class WorldScene extends Phaser.Scene {
         expired = true;
       }
       if (expired) this.renderPill(id);
-    }
-  }
-
-  /**
-   * Show a small static "INSTRUCTIONS" chip below the pill whenever the
-   * agent has fresh thinking content. Clicking it opens the activity
-   * modal, where the full thinking text + tool log lives. We don't
-   * render the actual thinking text in-canvas — at small font sizes it
-   * either overflowed the chip or sprawled across the world.
-   */
-  private tickThinkingBadges() {
-    const thinking = useAgentStore.getState().thinkingByAgent;
-    const now = this.time.now;
-    const TTL = 8000;
-
-    for (const [id, npc] of this.npcs) {
-      if (!npc.sprite || !npc.sprite.scene) continue;
-      // Suppress while in transit — the walk badge owns that slot.
-      const isTransiting = !!npc.transitTarget;
-      const raw = isTransiting ? "" : thinking[id];
-      const text = raw ? raw.replace(/\s+/g, " ").trim() : "";
-
-      // Reset TTL whenever the underlying text changes.
-      if (text && text !== npc.thinkingText) {
-        npc.thinkingText = text;
-        npc.thinkingUpdatedAt = now;
-      }
-
-      const expired =
-        npc.thinkingUpdatedAt !== undefined &&
-        now - npc.thinkingUpdatedAt > TTL;
-
-      if (!text || expired) {
-        if (npc.thinkingBadge) {
-          npc.thinkingBadge.destroy();
-          npc.thinkingBadge = undefined;
-        }
-        npc.thinkingText = undefined;
-        npc.thinkingUpdatedAt = undefined;
-        continue;
-      }
-
-      if (!npc.thinkingBadge) {
-        const chip = this.add
-          .text(0, 0, "📝 INSTRUCTIONS", {
-            fontFamily: '"Press Start 2P", monospace',
-            fontSize: "7px",
-            color: "#d5d8ff",
-            backgroundColor: "#141827",
-            padding: { x: 5, y: 3 },
-            resolution: 3,
-          })
-          .setOrigin(0.5, 1)
-          .setAlpha(0.95);
-        chip.setInteractive({ useHandCursor: true });
-        chip.on("pointerdown", () => {
-          useActivityModalStore.getState().openFor(id);
-        });
-        npc.thinkingBadge = chip;
-      }
-
-      // Pin to sprite each frame.
-      const cx = npc.sprite.x;
-      const cy = npc.sprite.y - TILE_SIZE - 22;
-      npc.thinkingBadge.setPosition(cx, cy);
-      npc.thinkingBadge.setDepth(1599 + npc.sprite.y);
     }
   }
 
@@ -2324,15 +2459,16 @@ export class WorldScene extends Phaser.Scene {
             toY: npc.sprite.y,
           });
           if (offset) {
-            // Force facing toward camera so seated agents look out at
-            // the player rather than wherever the last step came from.
-            npc.facing = "down";
+            // Face the nearest desk so seated agents look at their
+            // workstation instead of the last step's incoming axis.
+            const facing = this.deskFacingFor(next.col, next.row);
+            npc.facing = facing;
             try {
               npc.sprite.stop();
-              // Swap to the seated pose from the per-character sit
-              // sheet. Frame 0 of the matching direction is the
-              // resting "sat at desk" silhouette.
-              npc.sprite.setTexture(npc.sitSheetKey, SIT_FRAME.down);
+              // Use the idle sheet's first frame in the chosen direction.
+              // The dedicated sit sheet is single-direction so it can't
+              // express "facing the desk"; the idle sheet has all 4.
+              npc.sprite.setTexture(npc.idleAnimKey, IDLE_FRAME[facing][0]);
             } catch {
               // sprite torn down mid-tween — ignore
             }
@@ -2556,6 +2692,650 @@ export class WorldScene extends Phaser.Scene {
       // ignore
     }
     entity.helper = undefined;
+  }
+
+  // --------------------------------------------------------------------
+  // World-life v2 — Stage 1 (spec §2 + §9)
+  //
+  // The block below adds a 2 Hz state-machine evaluator and a per-NPC
+  // structured transition log. ALL of it is gated behind the
+  // `worldLifeV2` settings flag; with the flag off, none of this code
+  // runs and behaviour is byte-identical to today.
+  //
+  // Stage 1 only updates per-NPC FSM state + emits log lines. No
+  // visual side effects yet — those land in #241/238/237/240/239.
+  // --------------------------------------------------------------------
+
+  /** Subscribe to the settings store and start/stop the evaluator
+   *  whenever `worldLifeV2` flips. Called once from create(). */
+  private subscribeWorldLifeFlag() {
+    const start = (on: boolean) => {
+      if (on && !this.worldLifeTimer) {
+        // 2 Hz tick (spec §2 TICK_HZ). Phaser's TimerEvent uses ms.
+        const delay = Math.round(1000 / WORLD_LIFE_TUNABLES.TICK_HZ);
+        this.worldLifeTimer = this.time.addEvent({
+          delay,
+          loop: true,
+          callback: () => this.tickWorldLife(),
+        });
+        // Seed FSM entries for every NPC currently in the scene so
+        // the first tick has somewhere to start. Default state is
+        // ROOM_IDLE — ACTIVE_TOOL gets set by the next tool event.
+        const now = Date.now();
+        for (const [id] of this.npcs) {
+          worldLifeDebug.ensure(id, "ROOM_IDLE", now);
+        }
+        // Stage 3: idle micro-animations controller.
+        this.idleAnimCtrl = new IdleAnimController(this, {
+          spriteFor: (id) => this.npcs.get(id)?.sprite,
+          isSeated: (id) => this.seatByNpc.has(id),
+          roomFor: (id) => {
+            const npc = this.npcs.get(id);
+            if (!npc) return null;
+            return roomIdForCell(npc.col, npc.row);
+          },
+          isSuspended: (id) => {
+            const npc = this.npcs.get(id);
+            if (!npc) return true;
+            // Suspended when: walking, has active choreo, in dialog, or selected
+            if (this.npcPaths.has(id)) return true;
+            if (npc.choreo) return true;
+            const state = worldLifeDebug.states[id];
+            if (state === "IN_DIALOG" || state === "SUMMONED" || state === "TRAVELING" || state === "ACTIVE_TOOL") return true;
+            return false;
+          },
+        });
+        // Seed channels for existing NPCs
+        for (const [id] of this.npcs) {
+          this.idleAnimCtrl.ensure(id);
+        }
+        // Stage 4: dwell ladder — tracks how long each NPC has dwelled
+        // in one room without tool events, driving micro-trip / break rolls.
+        this.dwellTracker = new DwellTracker();
+        for (const [id] of this.npcs) {
+          this.dwellTracker.ensure(id, Date.now());
+        }
+        // Stage 5: chit-chat engine
+        this.chatEngine = new ChitChatEngine();
+      } else if (!on && this.worldLifeTimer) {
+        this.worldLifeTimer.destroy();
+        this.worldLifeTimer = null;
+        this.idleAnimCtrl?.destroy();
+        this.idleAnimCtrl = null;
+        this.dwellTracker?.destroy();
+        this.dwellTracker = null;
+        for (const h of this.microTrips.values()) h.stop();
+        this.microTrips.clear();
+        // Stage 5: destroy chat engine + bubbles + timers
+        this.chatEngine?.destroy();
+        this.chatEngine = null;
+        for (const b of this.activeBubbles.values()) b.destroy();
+        this.activeBubbles.clear();
+        for (const t of this.chatAdvanceTimers.values()) t.remove(false);
+        this.chatAdvanceTimers.clear();
+      }
+    };
+    start(useSettingsStore.getState().worldLifeV2);
+    const onCalm = (calm: boolean) => this.handleCalmModeChange(calm);
+    this.unsubscribeSettings = useSettingsStore.subscribe(
+      (state, prev) => {
+        if (state.worldLifeV2 !== prev.worldLifeV2) start(state.worldLifeV2);
+        if (state.calmMode !== prev.calmMode) onCalm(state.calmMode);
+      },
+    );
+  }
+
+  /** Called when the settings store's `calmMode` flag changes.
+   *  When calm mode turns ON all decorative world-life visuals stop
+   *  (idle anims, lounge signatures, micro-trips, chit-chat bubbles).
+   *  The FSM + real tool events keep working.
+   *  When calm mode turns OFF, idle-anims are re-initialized. */
+  private handleCalmModeChange(calm: boolean) {
+    if (calm) {
+      // Freeze everything decorative
+      this.idleAnimCtrl?.destroy();
+      this.idleAnimCtrl = null;
+      for (const h of this.loungeSignatures.values()) h.stop();
+      this.loungeSignatures.clear();
+      for (const h of this.persistedMugs.values()) h.destroy();
+      this.persistedMugs.clear();
+      for (const h of this.microTrips.values()) h.stop();
+      this.microTrips.clear();
+      // End all chats gracefully
+      if (this.chatEngine) {
+        for (const session of this.chatEngine.getActiveSessions()) {
+          this.chatEngine.endSession(session.sessionId, Date.now());
+        }
+      }
+      for (const b of this.activeBubbles.values()) b.destroy();
+      this.activeBubbles.clear();
+      for (const t of this.chatAdvanceTimers.values()) t.remove(false);
+      this.chatAdvanceTimers.clear();
+    } else {
+      // Re-initialize idle anims if worldLifeV2 is on
+      if (this.worldLifeTimer && !this.idleAnimCtrl) {
+        this.idleAnimCtrl = new IdleAnimController(this, {
+          spriteFor: (id) => this.npcs.get(id)?.sprite,
+          isSeated: (id) => this.seatByNpc.has(id),
+          roomFor: (id) => {
+            const npc = this.npcs.get(id);
+            if (!npc) return null;
+            return roomIdForCell(npc.col, npc.row);
+          },
+          isSuspended: (id) => {
+            const npc = this.npcs.get(id);
+            if (!npc) return true;
+            if (this.npcPaths.has(id)) return true;
+            if (npc.choreo) return true;
+            const state = worldLifeDebug.states[id];
+            if (state === "IN_DIALOG" || state === "SUMMONED" || state === "TRAVELING" || state === "ACTIVE_TOOL") return true;
+            return false;
+          },
+        });
+        for (const [id] of this.npcs) {
+          this.idleAnimCtrl.ensure(id);
+        }
+      }
+    }
+  }
+
+  /** Hook called from subscribeStores when an NPC's `activities[id].version`
+   *  increments (real tool/state event). When the timer is running we
+   *  drive the FSM into ACTIVE_TOOL via the standard transition path.
+   *  We use the timer (not the flag) as the single source of truth so
+   *  the flag is checked exactly once — when the timer is created in
+   *  subscribeWorldLifeFlag. */
+  private worldLifeOnToolEvent(agentId: string) {
+    if (!this.worldLifeTimer) return;
+    const now = Date.now();
+    this.worldLifeLastToolAt.set(agentId, now);
+    worldLifeDebug.ensure(agentId, "ROOM_IDLE", now);
+    this.applyWorldLifeTransition(agentId, { name: "tool_event" }, now);
+
+    // Dwell ladder: bump-back on same-room tool event.
+    if (this.dwellTracker) {
+      // Treat all tool events as same-room since room changes happen via
+      // walkNpcToRoom which isn't tied to tool events.
+      this.dwellTracker.onToolEvent(agentId, true, now);
+    }
+
+    // Preempt any in-flight micro-trip on tool event.
+    const tripHandle = this.microTrips.get(agentId);
+    if (tripHandle) {
+      tripHandle.stop();
+      this.microTrips.delete(agentId);
+    }
+
+    // Stage 5: interrupt any active chat session on tool event.
+    if (this.chatEngine) {
+      const session = this.chatEngine.getSessionFor(agentId);
+      if (session && !session.ended) {
+        this.chatEngine.interrupt(session.sessionId, agentId, now);
+        // Show farewell wave on partner
+        const partnerId = session.initiatorId === agentId ? session.partnerId : session.initiatorId;
+        this.showFarewellBubble(partnerId);
+        this.endChatVisuals(session);
+        // Transition partner back to ROOM_IDLE
+        if (worldLifeDebug.states[partnerId] === "CHIT_CHAT") {
+          this.applyWorldLifeTransition(partnerId, { name: "chitchat_complete" }, now);
+        }
+      }
+    }
+  }
+
+  /** 2 Hz evaluator. Walks every NPC and feeds the relevant
+   *  per-state trigger into nextState(). Handles:
+   *  - ACTIVE_TOOL → ROOM_IDLE (after TOOL_QUIET_S)
+   *  - ROOM_IDLE → ROOM_SIGNATURE (signature_roll in lounge)
+   *  - ROOM_SIGNATURE → ROOM_IDLE (signature_complete)
+   *
+   *  No flag check here — the timer is only created when the flag is
+   *  on (see subscribeWorldLifeFlag), so the timer's existence is the
+   *  single source of truth. */
+  private tickWorldLife() {
+    const now = Date.now();
+    const calm = useSettingsStore.getState().calmMode;
+    for (const [id, npc] of this.npcs) {
+      worldLifeDebug.ensure(id, "ROOM_IDLE", now);
+      const cur = worldLifeDebug.states[id];
+
+      if (cur === "ACTIVE_TOOL") {
+        // --- Stage 1: tool quiet → ROOM_IDLE ---
+        const lastTool = this.worldLifeLastToolAt.get(id) ?? 0;
+        const quietS = (now - lastTool) / 1000;
+        if (quietS >= WORLD_LIFE_TUNABLES.TOOL_QUIET_S) {
+          this.applyWorldLifeTransition(
+            id,
+            { name: "tool_quiet_elapsed", dwellS: quietS },
+            now,
+          );
+        }
+        // Tool event also preempts an in-flight signature
+        const sigHandle = this.loungeSignatures.get(id);
+        if (sigHandle) {
+          sigHandle.stop();
+          this.loungeSignatures.delete(id);
+        }
+        // Hard-kill any persisted mug on tool preemption (spec §4 rule 4)
+        const mugHandle = this.persistedMugs.get(id);
+        if (mugHandle) {
+          mugHandle.destroy();
+          this.persistedMugs.delete(id);
+        }
+      } else if (cur === "ROOM_IDLE") {
+        const room = roomIdForCell(npc.col, npc.row);
+
+        if (!calm) {
+          // --- Stage 2: signature roll (lounge only) ---
+          if (room === "lounge") {
+            // If NPC returned to lounge, cancel any persisted mug decay timer
+            const existingMug = this.persistedMugs.get(id);
+            if (existingMug) {
+              existingMug.cancelDecay();
+              this.persistedMugs.delete(id);
+            }
+
+            const enteredAt = worldLifeDebug.enteredAt[id] ?? now;
+            const dwellS = (now - enteredAt) / 1000;
+            if (dwellS >= WORLD_LIFE_TUNABLES.SIG_MIN_S) {
+              const cd = worldLifeDebug.cooldowns[id];
+              const { ready } = cd ? sigCooldown(cd, "lounge", now) : { ready: true };
+              if (ready) {
+                const roll = Math.random();
+                const threshold = WORLD_LIFE_TUNABLES.SIG_PROB;
+                if (roll < threshold) {
+                  this.applyWorldLifeTransition(
+                    id,
+                    { name: "signature_roll", dwellS, roll, threshold },
+                    now,
+                  );
+                  // Set cooldown
+                  if (cd) setSigCooldown(cd, "lounge", now);
+                  // Start the visual
+                  this.startLoungeSignatureFor(id, npc);
+                }
+              }
+            }
+          }
+
+          // --- Dwell ladder: micro-trip rolls (S3/S4/S5) ---
+          if (this.dwellTracker && room !== "lounge") {
+            const dwell = this.dwellTracker.ensure(id, now);
+
+            if (dwell.stage === "S3" || dwell.stage === "S4" || dwell.stage === "S5") {
+              // S3: micro-trip at raised probability
+              // S4: break (longer trip to lounge)
+              // S5: alternate trip/break
+              const isBreak = dwell.stage === "S4" ||
+                (dwell.stage === "S5" && this.dwellTracker.nextS5Sub(id) === "break");
+
+              if (isBreak) {
+                // Check break anti-patterns
+                const lastTool = this.worldLifeLastToolAt.get(id) ?? 0;
+                if (this.dwellTracker.canBreak(id, lastTool, now)) {
+                  const roll = Math.random();
+                  const threshold = WORLD_LIFE_TUNABLES.MICRO_PROB * 3;
+                  if (roll < threshold) {
+                    this.applyWorldLifeTransition(
+                      id,
+                      { name: "microtrip_roll", dwellS: (now - (worldLifeDebug.enteredAt[id] ?? now)) / 1000, roll, threshold },
+                      now,
+                    );
+                    this.startMicroTripFor(id, npc, { isBreak: true });
+                    this.dwellTracker.recordBreak(id, now);
+                    if (dwell.stage === "S5") this.dwellTracker.recordS5Sub(id, "break");
+                  }
+                }
+              } else {
+                // Regular micro-trip
+                if (this.dwellTracker.canMicroTrip(id, now)) {
+                  const cd = worldLifeDebug.cooldowns[id] ?? makeCooldowns();
+                  const { ready } = microCooldown(cd, now);
+                  if (ready) {
+                    const roll = Math.random();
+                    const threshold = 0.60; // raised per spec in S3+ window
+                    if (roll < threshold) {
+                      this.applyWorldLifeTransition(
+                        id,
+                        { name: "microtrip_roll", dwellS: (now - (worldLifeDebug.enteredAt[id] ?? now)) / 1000, roll, threshold },
+                        now,
+                      );
+                      this.startMicroTripFor(id, npc, { isBreak: false });
+                      setMicroCooldown(cd, now);
+                      this.dwellTracker.recordMicroTrip(id, now);
+                      if (dwell.stage === "S5") this.dwellTracker.recordS5Sub(id, "trip");
+                    }
+                  }
+                }
+              }
+            }
+          }
+
+          // --- Stage 5: chit-chat roll ---
+          if (this.chatEngine && !this.chatEngine.isAtGlobalCap()) {
+            const chatRoom = roomIdForCell(npc.col, npc.row);
+            if (chatRoom) {
+              const chatProb = chatProbForRoom(chatRoom);
+              if (chatProb > 0 && this.chatEngine.canChat(id, now)) {
+                for (const [otherId, otherNpc] of this.npcs) {
+                  if (otherId === id) continue;
+                  const otherState = worldLifeDebug.states[otherId];
+                  if (otherState !== "ROOM_IDLE") continue;
+                  const otherRoom = roomIdForCell(otherNpc.col, otherNpc.row);
+                  if (otherRoom !== chatRoom) continue;
+                  if (!this.chatEngine.canChat(otherId, now)) continue;
+                  // Proximity check: <= 120 px
+                  const dx = npc.sprite.x - otherNpc.sprite.x;
+                  const dy = npc.sprite.y - otherNpc.sprite.y;
+                  const dist = Math.sqrt(dx * dx + dy * dy);
+                  if (dist > 120) continue;
+                  // Both roll against chatProb
+                  const roll = Math.random();
+                  if (roll >= chatProb) continue;
+                  const partnerRoll = Math.random();
+                  if (partnerRoll >= chatProb) continue;
+                  // Start the chat!
+                  const mood = this.getAgentMood(id);
+                  const session = this.chatEngine.tryStartChat(id, otherId, mood, now);
+                  if (!session) continue;
+                  // Transition both to CHIT_CHAT
+                  this.applyWorldLifeTransition(id, { name: "chitchat_roll", hasChatPartner: true, roll, threshold: chatProb }, now);
+                  this.applyWorldLifeTransition(otherId, { name: "chitchat_roll", hasChatPartner: true, roll: partnerRoll, threshold: chatProb }, now);
+                  // Start the visual exchange sequence
+                  this.startChatExchange(session);
+                  break; // only start one chat per tick per NPC
+                }
+              }
+            }
+          }
+        }
+      } else if (cur === "ROOM_SIGNATURE") {
+        // --- Stage 2: tick in-flight signature, complete when done ---
+        const sigHandle = this.loungeSignatures.get(id);
+        if (sigHandle && sigHandle.done) {
+          this.loungeSignatures.delete(id);
+          this.applyWorldLifeTransition(
+            id,
+            { name: "signature_complete" },
+            now,
+          );
+        }
+        // If the NPC has left the lounge (e.g. walked away), soft-stop
+        const room = roomIdForCell(npc.col, npc.row);
+        if (room !== "lounge" && sigHandle && !sigHandle.done) {
+          const mugPersist = sigHandle.softStop();
+          this.loungeSignatures.delete(id);
+          if (mugPersist) {
+            this.persistedMugs.set(id, mugPersist);
+          }
+          this.applyWorldLifeTransition(
+            id,
+            { name: "signature_complete" },
+            now,
+          );
+        }
+      } else if (cur === "MICRO_TRIP") {
+        // --- Stage 4: tick in-flight micro-trip, complete when done ---
+        const tripHandle = this.microTrips.get(id);
+        if (tripHandle && tripHandle.done) {
+          this.microTrips.delete(id);
+          this.applyWorldLifeTransition(id, { name: "microtrip_complete" }, now);
+          if (this.dwellTracker) {
+            this.dwellTracker.recordMicroTrip(id, now);
+          }
+        }
+      } else if (cur === "CHIT_CHAT") {
+        // --- Stage 5: hard kill (16s wall-clock cap) ---
+        const session = this.chatEngine?.getSessionFor(id);
+        if (session && !session.ended && (now - session.startMs > 16000)) {
+          this.chatEngine?.endSession(session.sessionId, now);
+          this.endChatVisuals(session);
+          this.applyWorldLifeTransition(id, { name: "chitchat_complete" }, now);
+          // Also transition partner
+          const partnerId = session.initiatorId === id ? session.partnerId : session.initiatorId;
+          if (worldLifeDebug.states[partnerId] === "CHIT_CHAT") {
+            this.applyWorldLifeTransition(partnerId, { name: "chitchat_complete" }, now);
+          }
+        }
+      }
+    }
+    // FSM entries for despawned NPCs are removed in removeNpcEntity —
+    // no stale-sweep needed here.
+  }
+
+  /** Start the lounge signature visual for an NPC. Creates walkTo
+   *  callbacks that bridge back into the scene's pathfinding. */
+  private startLoungeSignatureFor(
+    npcId: string,
+    npc: Entity & { def: NpcDef; tween?: Phaser.Tweens.Tween },
+  ) {
+    // Resolve the lounge anchor
+    const anchor = ROOM_ANCHORS["lounge"];
+    if (!anchor) return;
+
+    // walkTo callback: uses walkNpcToCell + returns a Promise that
+    // resolves when the path drains.
+    const walkTo = (col: number, row: number): Promise<void> => {
+      return new Promise<void>((resolve, reject) => {
+        const entity = this.npcs.get(npcId);
+        if (!entity) { reject(); return; }
+        // If already at target, resolve immediately
+        if (entity.col === col && entity.row === row) { resolve(); return; }
+        this.walkNpcToCell(npcId, col, row);
+        // Poll for arrival (path drains) — check every step duration
+        const check = this.time.addEvent({
+          delay: STEP_DURATION_MS,
+          loop: true,
+          callback: () => {
+            const e = this.npcs.get(npcId);
+            if (!e) { check.remove(false); reject(); return; }
+            const path = this.npcPaths.get(npcId);
+            if (!path || path.length === 0) {
+              check.remove(false);
+              resolve();
+            }
+          },
+        });
+      });
+    };
+
+    const getPos = () => {
+      const e = this.npcs.get(npcId);
+      return e ? { col: e.col, row: e.row } : { col: anchor.col, row: anchor.row };
+    };
+
+    const handle = startLoungeSignature(
+      this,
+      npc.sprite,
+      anchor.col,
+      anchor.row,
+      { walkTo, getPos },
+    );
+    this.loungeSignatures.set(npcId, handle);
+  }
+
+  /** Start a micro-trip (or break) for an NPC. Bridges the scene's
+   *  pathfinding/position into the micro-trip visual module. */
+  private startMicroTripFor(
+    npcId: string,
+    npc: Entity & { def: NpcDef; tween?: Phaser.Tweens.Tween },
+    options: { isBreak: boolean },
+  ) {
+    const walkTo = (col: number, row: number): Promise<void> => {
+      return new Promise<void>((resolve, reject) => {
+        const entity = this.npcs.get(npcId);
+        if (!entity) { reject(); return; }
+        if (entity.col === col && entity.row === row) { resolve(); return; }
+        this.walkNpcToCell(npcId, col, row);
+        const check = this.time.addEvent({
+          delay: STEP_DURATION_MS,
+          loop: true,
+          callback: () => {
+            const e = this.npcs.get(npcId);
+            if (!e) { check.remove(false); reject(); return; }
+            const path = this.npcPaths.get(npcId);
+            if (!path || path.length === 0) {
+              check.remove(false);
+              resolve();
+            }
+          },
+        });
+      });
+    };
+
+    const getPos = () => {
+      const e = this.npcs.get(npcId);
+      return e ? { col: e.col, row: e.row } : { col: 0, row: 0 };
+    };
+
+    const getHomeSeat = () => {
+      const seat = this.seatByNpc.get(npcId);
+      return seat ? { col: seat.col, row: seat.row } : getPos();
+    };
+
+    const getAdjacentRooms = () => {
+      const currentRoom = roomIdForCell(npc.col, npc.row);
+      if (!currentRoom) return [];
+      const regions = getRoomRegions();
+      const current = regions.find(r => r.id === currentRoom);
+      if (!current) return [];
+      // Adjacency: rooms whose bounds are within 3 tiles of the current room's bounds
+      const ADJ_THRESHOLD = 3;
+      return regions
+        .filter(r => {
+          if (r.id === currentRoom) return false;
+          const hGap = Math.max(0, r.colMin - current.colMax - 1, current.colMin - r.colMax - 1);
+          const vGap = Math.max(0, r.rowMin - current.rowMax - 1, current.rowMin - r.rowMax - 1);
+          return hGap <= ADJ_THRESHOLD && vGap <= ADJ_THRESHOLD;
+        })
+        .map(r => {
+          const anchor = ROOM_ANCHORS[r.id];
+          return anchor ? { roomId: r.id as string, col: anchor.col, row: anchor.row } : null;
+        })
+        .filter((x): x is { roomId: string; col: number; row: number } => x !== null);
+    };
+
+    const tripHandle = startMicroTrip(this, npc.sprite, { walkTo, getPos, getHomeSeat, getAdjacentRooms }, options);
+    this.microTrips.set(npcId, tripHandle);
+  }
+
+  // ------------------------------------------------------------------
+  // Stage 5: chit-chat helper methods
+  // ------------------------------------------------------------------
+
+  private getAgentMood(_npcId: string): AgentMood {
+    // Check recent activity — if last tool event was an error, mood is "recent-error"
+    // For now, default to "neutral" — can be enhanced with activity store data
+    return "neutral";
+  }
+
+  private startChatExchange(session: ChatSession) {
+    // Advance immediately for first exchange (greeting)
+    this.advanceChatBubble(session);
+  }
+
+  private advanceChatBubble(session: ChatSession) {
+    if (session.ended || !this.chatEngine) return;
+    const result = this.chatEngine.advance(session.sessionId, Date.now());
+    if (!result) {
+      // Session ended (farewell was played)
+      this.endChatVisuals(session);
+      const now = Date.now();
+      this.applyWorldLifeTransition(session.initiatorId, { name: "chitchat_complete" }, now);
+      if (worldLifeDebug.states[session.partnerId] === "CHIT_CHAT") {
+        this.applyWorldLifeTransition(session.partnerId, { name: "chitchat_complete" }, now);
+      }
+      return;
+    }
+
+    // Show bubble for the speaker
+    const speakerId = result.speaker === "both" ? session.initiatorId : result.speaker;
+    const npc = this.npcs.get(speakerId);
+    const partnerId = speakerId === session.initiatorId ? session.partnerId : session.initiatorId;
+    const partner = this.npcs.get(partnerId);
+
+    if (npc && partner) {
+      // Destroy any existing bubble for this speaker
+      this.activeBubbles.get(speakerId)?.destroy();
+      const side = bubbleSide(npc.sprite.x, partner.sprite.x);
+      const handle = showChatBubble(this, { emoji: result.emoji, sprite: npc.sprite, side });
+      this.activeBubbles.set(speakerId, handle);
+
+      // If "both", also show on partner
+      if (result.speaker === "both") {
+        this.activeBubbles.get(partnerId)?.destroy();
+        const partnerSide = bubbleSide(partner.sprite.x, npc.sprite.x);
+        const partnerHandle = showChatBubble(this, { emoji: result.emoji, sprite: partner.sprite, side: partnerSide });
+        this.activeBubbles.set(partnerId, partnerHandle);
+      }
+    }
+
+    // Schedule next advance after bubble cycle (350 + 1800 + 250 + 400 gap = 2800ms)
+    const timer = this.time.delayedCall(2800, () => {
+      this.chatAdvanceTimers.delete(session.sessionId);
+      this.advanceChatBubble(session);
+    });
+    this.chatAdvanceTimers.set(session.sessionId, timer);
+  }
+
+  private showFarewellBubble(npcId: string) {
+    const npc = this.npcs.get(npcId);
+    if (!npc) return;
+    this.activeBubbles.get(npcId)?.destroy();
+    const handle = showChatBubble(this, { emoji: "\u{1F44B}", sprite: npc.sprite, side: "right" });
+    this.activeBubbles.set(npcId, handle);
+  }
+
+  private endChatVisuals(session: ChatSession) {
+    // Kill advance timer
+    const timer = this.chatAdvanceTimers.get(session.sessionId);
+    if (timer) { timer.remove(false); this.chatAdvanceTimers.delete(session.sessionId); }
+    // Let active bubbles finish their fade-out naturally (don't yank per spec)
+    // They'll auto-destroy after their cycle
+  }
+
+  /** Run the pure transition, and if it changed the state, push a ring
+   *  buffer entry and emit the structured log line (spec §9). */
+  private applyWorldLifeTransition(
+    npcId: string,
+    trigger: WorldLifeTrigger,
+    nowMs: number,
+  ) {
+    const from: WorldLifeState = worldLifeDebug.states[npcId] ?? "ROOM_IDLE";
+    const enteredAt = worldLifeDebug.enteredAt[npcId] ?? nowMs;
+    const dwellS = Math.max(0, (nowMs - enteredAt) / 1000);
+    const to = worldLifeNextState(from, trigger);
+    if (to === from) return;
+    const cd = worldLifeDebug.cooldowns[npcId];
+    const cooldownsS = cd
+      ? snapshotCooldownsS(cd, nowMs)
+      : { sig: 0, micro: 0, chat: 0 };
+    // Pull roll/threshold out of *_roll triggers so the structured log
+    // line can show the values that drove the transition. Other
+    // variants don't carry these fields.
+    const rollPayload =
+      trigger.name === "signature_roll" ||
+      trigger.name === "microtrip_roll" ||
+      trigger.name === "chitchat_roll"
+        ? { roll: trigger.roll, threshold: trigger.threshold }
+        : {};
+    const entry = {
+      ts: nowMs,
+      npcId,
+      from,
+      to,
+      trigger: trigger.name,
+      dwellS,
+      cooldownsS,
+      ...rollPayload,
+    };
+    worldLifeDebug.record(entry);
+    // Single structured log line per spec §9. Emitted at info so a
+    // grep over devtools console answers "why didn't she go get
+    // coffee?" in one line per transition.
+    if (typeof console !== "undefined") {
+      console.info(formatTransitionLog(entry));
+    }
   }
 }
 

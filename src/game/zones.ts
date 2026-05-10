@@ -43,6 +43,7 @@ const FALLBACK_ANCHORS: Partial<Record<RoomId, { col: number; row: number }>> = 
   tool_workshop: { col: 42, row: 3 },
   meeting_room: { col: 33, row: 10 },
   testing_lab: { col: 34, row: 3 },
+  lounge: { col: 20, row: 14 },
 };
 
 // South-edge entry/exit. Updated at load time to land on a walkable

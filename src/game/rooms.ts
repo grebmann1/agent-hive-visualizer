@@ -161,5 +161,6 @@ function FALLBACK_ANCHOR_DETAILS(): Record<RoomId, RoomAnchor> {
     testing_lab:   mk("testing_lab",   "Security",     34, 3),
     tool_workshop: mk("tool_workshop", "War Room",     42, 3),
     meeting_room:  mk("meeting_room",  "Meeting Room", 33, 10),
+    lounge:        mk("lounge",        "Coffee Bar",   20, 14),
   };
 }

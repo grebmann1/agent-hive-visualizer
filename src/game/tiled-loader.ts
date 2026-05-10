@@ -182,6 +182,11 @@ const ROOM_NAME_TO_ID: Record<string, RoomId> = {
   // Sub-agent collaboration — Task tool.
   "meeting room": "meeting_room",
   meeting: "meeting_room",
+  // Idle hangout / coffee — agents head here when nothing's happening.
+  coffeebar: "lounge",
+  "coffee bar": "lounge",
+  lounge: "lounge",
+  brainstorm: "lounge",
 };
 
 interface RawTileset {

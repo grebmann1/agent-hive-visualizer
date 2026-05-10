@@ -117,7 +117,7 @@ export default function TerminalPanel({
               <button
                 type="button"
                 onClick={onRequestNew}
-                className="pixel-font text-[10px] px-3 py-2 rounded border-2 border-ink bg-accent text-paper-dim hover:bg-accent-dark hover:text-paper-dim tracking-wide"
+                className="pixel-font text-[10px] px-3 py-2 rounded border-2 border-ink bg-accent text-paper-dim hover:bg-[#c9a959] hover:text-paper-dim tracking-wide"
               >
                 + NEW AGENT
               </button>

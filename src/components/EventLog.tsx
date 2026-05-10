@@ -40,12 +40,15 @@ export default function EventLog() {
   const tail = events.slice(-MAX_ROWS).reverse();
 
   return (
-    <div className="panel text-[11px] flex flex-col" style={{ minHeight: 0 }}>
+    <div
+      className="panel text-[11px] flex flex-col"
+      style={open ? { minHeight: 0 } : { minHeight: 0, padding: "4px 8px" }}
+    >
       <div className="flex items-center justify-between mb-2">
-        <h3 className="pixel-font text-[10px] tracking-wide">▸ EVENT LOG</h3>
+        <h3 className="pixel-font text-[12px] tracking-wide">▸ EVENT LOG</h3>
         <button
           onClick={() => setOpen((v) => !v)}
-          className="pixel-font text-[8px] text-ink-soft hover:text-ink underline"
+          className="hud-chip hud-chip-interactive"
           title="Toggle with L"
         >
           {open ? "[HIDE]" : "[SHOW]"}

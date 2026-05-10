@@ -602,13 +602,13 @@ export default function DialogBox() {
         {headerStrip}
         {line && speaker && (
           <div className="flex items-center justify-between mb-2">
-            <div className="pixel-font text-[11px] text-accent-dark tracking-wide">
+            <div className="pixel-font text-[11px] text-accent tracking-wide">
               ◆ {speaker.toUpperCase()}
             </div>
             {showCancel && (
               <button
                 onClick={cancelInFlight}
-                className="pixel-font text-[9px] px-2 py-1 rounded border-2 border-ink bg-paper-dim hover:bg-white text-ink tracking-wide"
+                className="pixel-font text-[9px] py-1 px-2 rounded border-2 border-ink bg-paper-dim hover:bg-white text-ink tracking-wide"
               >
                 [CANCEL]
               </button>
@@ -636,7 +636,7 @@ export default function DialogBox() {
             <>
               {line.source === "player" ? (
                 <span className="text-ink-soft">
-                  <span className="text-accent-dark mr-1">▸ YOU</span>
+                  <span className="text-accent mr-1">▸ YOU</span>
                   {revealed}
                 </span>
               ) : line.source === "system" ? (
@@ -645,14 +645,14 @@ export default function DialogBox() {
                 <span>
                   {revealed}
                   {isCurrentStreaming && isStreamingActive && (
-                    <span className="ml-0.5 inline-block animate-pulse text-accent-dark">
+                    <span className="ml-0.5 inline-block animate-pulse text-accent">
                       ▍
                     </span>
                   )}
                 </span>
               )}
               {done && !isStreamingActive && dialog.queue.length > 1 && (
-                <span className="ml-2 inline-block animate-pulse text-accent-dark">
+                <span className="ml-2 inline-block animate-pulse text-accent">
                   ▼
                 </span>
               )}
@@ -733,7 +733,7 @@ export default function DialogBox() {
               cancelInFlight();
               closeDialog();
             }}
-            className="pixel-font text-[9px] text-ink-soft hover:text-ink underline"
+            className="pixel-font text-[9px] py-1 px-2 rounded border border-ink/30 text-ink-soft hover:bg-paper-dim hover:text-ink underline"
           >
             [CLOSE]
           </button>

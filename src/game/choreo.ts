@@ -19,7 +19,8 @@ export type ChoreoKind =
   | "pondering"
   | "planning"
   | "directing"
-  | "sit-down";
+  | "sit-down"
+  | "sip-coffee";
 
 /**
  * Map a Claude tool name (from transcript `tool_use.name`) to a choreo kind.
@@ -59,6 +60,7 @@ const EMOJI_FOR_CHOREO: Partial<Record<ChoreoKind, string>> = {
   pondering: "💭",
   planning: "✓",
   directing: "📜",
+  "sip-coffee": "☕",
   // "idle-bob" has no floating emoji.
 };
 
@@ -389,6 +391,26 @@ export function startChoreo(
         }),
       );
       emojiText = floatEmoji(EMOJI_FOR_CHOREO.directing!, { persistent: true });
+      break;
+    }
+
+    case "sip-coffee": {
+      // Gentle scale-bob as the NPC sips coffee — mug emoji floats at
+      // hand height. ~2s period breathing loop.
+      setFrameIfExists(FRAME_DOWN_0);
+      tweens.push(
+        scene.tweens.add({
+          targets: sprite,
+          scaleY: { from: ry(0.97), to: ry(1.0) },
+          duration: 1000,
+          yoyo: true,
+          repeat: -1,
+          ease: "Sine.easeInOut",
+        }),
+      );
+      emojiText = floatEmoji(EMOJI_FOR_CHOREO["sip-coffee"]!, {
+        persistent: true,
+      });
       break;
     }
   }

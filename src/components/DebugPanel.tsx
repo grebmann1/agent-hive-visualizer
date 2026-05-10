@@ -67,19 +67,26 @@ export default function DebugPanel({ open, onClose }: Props) {
       onClick={onClose}
     >
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="debug-panel-title"
         className="dialog-box w-[min(92vw,440px)]"
         onClick={(e) => e.stopPropagation()}
+        style={{ animation: "dialogIn 180ms ease" }}
       >
         <div className="flex items-center justify-between mb-3">
-          <h3 className="pixel-font text-[12px] text-accent-dark">
+          <h3
+            id="debug-panel-title"
+            className="pixel-font text-[12px] text-accent"
+          >
             ◆ DEBUG TOOLS
           </h3>
           <button
             onClick={onClose}
-            className="pixel-font text-[10px] text-ink-soft hover:text-ink"
-            aria-label="Close debug panel"
+            className="pixel-font text-[10px] text-ink-soft hover:text-ink underline"
+            aria-label="Close dialog"
           >
-            ESC ×
+            [CLOSE]
           </button>
         </div>
 
@@ -92,8 +99,8 @@ export default function DebugPanel({ open, onClose }: Props) {
               onClick={toggle}
               className="pixel-font text-[9px] px-2 py-1 rounded border-2 border-ink"
               style={{
-                background: logOn ? "#22c55e" : "#2a3150",
-                color: logOn ? "#0e1018" : "#8e94bf",
+                background: logOn ? "#6ee7b7" : "#2a3150",
+                color: logOn ? "#141827" : "#8e94bf",
               }}
             >
               {logOn ? "ON" : "OFF"}

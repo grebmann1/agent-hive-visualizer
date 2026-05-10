@@ -21,14 +21,14 @@ const PROVIDER_CHIPS: Record<AgentProviderId | "external" | "live", ChipDef> = {
   cursor: { label: "CURSOR", bg: "#5b3a7c", color: "#fff", title: "Cursor agent" },
   "claude-master": {
     label: "MASTER",
-    bg: "#22c55e",
-    color: "#0e1018",
+    bg: "#6ee7b7",
+    color: "#141827",
     title: "Master Claude (orchestrator)",
   },
   external: {
     label: "EXTERNAL",
     bg: "#2a3150",
-    color: "#8e94bf",
+    color: "#d5d8ff",
     title: "Detected external session (not launched from Agent Force HQ)",
   },
   claude: { label: "LIVE", bg: "#c9a959", color: "#1b1e2b" },
@@ -74,9 +74,9 @@ export default function AgentRoster() {
   const all = [...staticList, ...dynamicList];
 
   return (
-    <div className="panel flex flex-col h-full min-h-0">
+    <div className="panel flex flex-col h-full min-h-0" aria-live="polite" role="log">
       <div className="flex items-center justify-between mb-3">
-        <h3 className="pixel-font text-[12px]">▸ AGENTS</h3>
+        <h3 className="pixel-font text-[12px]">AGENTS</h3>
         <span className="pixel-font text-[9px] text-ink-soft">
           {all.length} TOTAL
         </span>
@@ -88,11 +88,11 @@ export default function AgentRoster() {
             NO AGENTS YET
           </p>
           <p className="text-[12px] leading-relaxed opacity-75 mb-3">
-            Start a Claude session from inside Agent Force HQ — or press{" "}
-            <span className="pixel-font text-[9px] px-1 bg-paper-dim border border-ink rounded">
-              ⌘N
-            </span>{" "}
-            anywhere.
+            Run{" "}
+            <code className="pixel-font text-[10px] px-1 bg-paper-dim border border-ink rounded">
+              claude
+            </code>{" "}
+            in any project, or start one here.
           </p>
           <button
             type="button"
@@ -109,7 +109,7 @@ export default function AgentRoster() {
                 }),
               );
             }}
-            className="pixel-font text-[10px] px-3 py-2 rounded border-2 border-ink bg-accent text-paper-dim hover:bg-accent-dark hover:text-paper-dim tracking-wide mb-3"
+            className="pixel-font text-[10px] px-3 py-2 rounded border-2 border-ink bg-accent text-paper-dim hover:bg-[#c9a959] hover:text-paper-dim tracking-wide mb-3"
           >
             + NEW AGENT
           </button>
@@ -119,7 +119,7 @@ export default function AgentRoster() {
           <p className="text-[12px] leading-relaxed mb-3 opacity-75">
             Click an agent to chat. Right-click for activity.
           </p>
-          <ul className="space-y-2 overflow-y-auto pixel-scroll flex-1 pr-1 min-h-0">
+          <ul className="space-y-2 overflow-y-auto overflow-x-hidden pixel-scroll flex-1 pr-1 min-h-0">
             {[...staticList, ...dynamicParents].map((n) =>
               renderRow(n, false, {
                 activities,
@@ -169,7 +169,7 @@ function renderRow(
   const avatarSize = isChild ? 24 : 40;
   // Sub-agents render nested under their parent — bigger left padding
   // plus a thin accent border so the relationship is unmistakable.
-  const indent = isChild ? "pl-8 border-l-2 border-accent-dark/40 ml-3" : "";
+  const indent = isChild ? "pl-8 border-l-2 border-accent/40 ml-3" : "";
 
   const handleClick = () => {
     // Always summon in-world.
@@ -194,10 +194,11 @@ function renderRow(
       if (bridge?.focusExternalHost) {
         bridge.focusExternalHost(dyn.pid).then((res) => {
           if (!res.ok) {
+            console.debug("[AgentRoster] external agent pid", dyn.pid);
             useToastStore
               .getState()
               .show(
-                `This agent runs outside Agent Force HQ (PID ${dyn.pid}) — switch via ⌘⇥.`,
+                "This agent is running in another window. Use your OS app switcher to bring it to front.",
                 "warn",
               );
           }
@@ -217,7 +218,7 @@ function renderRow(
       onClick={handleClick}
       onContextMenu={handleContextMenu}
       title="Click to call this agent over"
-      className={`flex items-start gap-3 p-2 rounded ${indent} cursor-pointer hover:bg-paper-dim/60`}
+      className={`agent-row flex items-start gap-3 p-2 rounded ${indent} cursor-pointer hover:bg-paper-dim/60`}
       style={{
         background: isActive ? "rgba(201, 169, 89, 0.25)" : "transparent",
         border: "2px solid " + (isActive ? "#1b1e2b" : "transparent"),
@@ -227,25 +228,20 @@ function renderRow(
         <NpcAvatar id={n.id} size={avatarSize} />
       </div>
       <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2 mb-1">
+        <div className="flex items-center gap-2 gap-y-1 flex-wrap mb-1">
           <span
-            className="pixel-font"
-            style={{ fontSize: isChild ? 10 : 11 }}
+            className="pixel-font truncate"
+            style={{ fontSize: isChild ? 11 : 12 }}
           >
             {n.name.toUpperCase()}
           </span>
-          {isActive && (
-            <span className="pixel-font text-[8px] px-1.5 py-0.5 rounded bg-ink text-paper">
-              TALKING
-            </span>
-          )}
           {(() => {
             const dyn = isDynamic ? (n as DynamicNpc) : null;
             const chip = pickProviderChip(isDynamic, dyn?.provider, isExternal);
             if (!chip) return null;
             return (
               <span
-                className="pixel-font text-[8px] px-1.5 py-0.5 rounded"
+                className="pixel-font text-[10px] px-1.5 py-0.5 rounded"
                 style={{ background: chip.bg, color: chip.color }}
                 title={chip.title}
               >
@@ -253,25 +249,37 @@ function renderRow(
               </span>
             );
           })()}
-          {hasChildren && (
-            <span
-              className="pixel-font text-[8px] px-1.5 py-0.5 rounded"
-              style={{ background: "#1b1e2b", color: "#f4ecd8" }}
-              title="This agent has spawned sub-agents"
-            >
-              HELPER
-            </span>
-          )}
-          {errorByAgent[n.id] && (
-            <span
-              className="pixel-font text-[8px] px-1.5 py-0.5 rounded"
-              style={{ background: "#ef4444", color: "#fff" }}
-              title={errorByAgent[n.id].message}
-            >
-              ERROR
-            </span>
-          )}
         </div>
+        {(isActive || hasChildren || errorByAgent[n.id]) && (
+          <div className="flex items-center flex-wrap gap-1 mt-0.5 mb-1 text-[10px]">
+            {isActive && (
+              <span className="pixel-font text-[10px] px-1.5 py-0.5 rounded bg-ink text-paper">
+                ▸ TALKING
+              </span>
+            )}
+            {hasChildren && (
+              <span
+                className="pixel-font text-[10px] px-1.5 py-0.5 rounded"
+                style={{ background: "#1b1e2b", color: "#f4ecd8" }}
+                title="This agent has spawned sub-agents"
+              >
+                ↳ HELPER
+              </span>
+            )}
+            {errorByAgent[n.id] && (
+              <span
+                role="alert"
+                aria-live="assertive"
+                aria-label={errorByAgent[n.id].message}
+                className="pixel-font text-[10px] px-1.5 py-0.5 rounded"
+                style={{ background: "#ef4444", color: "#fff" }}
+                title={errorByAgent[n.id].message}
+              >
+                ! ERROR
+              </span>
+            )}
+          </div>
+        )}
         <div
           className="opacity-75 truncate"
           style={{ fontSize: isChild ? 10 : 11 }}

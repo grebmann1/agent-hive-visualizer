@@ -58,14 +58,22 @@ export default function ShortcutsModal() {
       onClick={() => setOpen(false)}
     >
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="shortcuts-modal-title"
         className="dialog-box w-[min(92vw,480px)]"
         onClick={(e) => e.stopPropagation()}
+        style={{ animation: "dialogIn 180ms ease" }}
       >
         <div className="flex items-center justify-between mb-3">
-          <h2 className="pixel-font text-[13px] text-accent-dark">
+          <h2
+            id="shortcuts-modal-title"
+            className="pixel-font text-[13px] text-accent"
+          >
             ◆ KEYBOARD SHORTCUTS
           </h2>
           <button
+            aria-label="Close dialog"
             onClick={() => setOpen(false)}
             className="pixel-font text-[9px] text-ink-soft hover:text-ink underline"
           >
