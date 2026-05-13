@@ -17,16 +17,17 @@ import { buildLiveGreeting, useNpcStore } from "../stores/useNpcStore";
 import { useWorldBus } from "../stores/useWorldBus";
 import { GB, TILE_SIZE } from "./palette";
 import { type NpcDef } from "./npcs";
-import { bfs } from "./pathfind";
 import { ROOM_ANCHORS, getRoomRegions, roomIdForCell } from "./rooms";
 import { roomById } from "./room-registry";
 import {
   EXTERIOR_ANCHORS,
+  isRoomReachable,
   isWalkableIn,
   loadInteriorZone,
   type ZoneDef,
 } from "./zones";
-import { resolveGid, type DeskRect, type SeatCell } from "./tiled-loader";
+import { resolveGid, type SeatCell } from "./tiled-loader";
+import { MovementDirector, SeatManager, type NpcHandle } from "./movement";
 import { download as downloadAgentLog, logAgent, size as agentLogSize } from "./agentLog";
 import {
   type ChoreoHandle,
@@ -205,8 +206,11 @@ interface HelperSprite {
 export class WorldScene extends Phaser.Scene {
   private npcs = new Map<string, Entity & { def: NpcDef; tween?: Phaser.Tweens.Tween }>();
 
-  // npc auto-walk state — one path per NPC
-  private npcPaths = new Map<string, { col: number; row: number }[]>();
+  // Movement system — single source of truth for all NPC pathfinding,
+  // route rules, and seat management. Initialized in create() (async).
+  private director: MovementDirector | null = null;
+  private seatMgr = new SeatManager();
+  private npcHandleCache = new Map<string, NpcHandle>();
 
   // visualizer store
   private unsubscribeAgents: (() => void) | null = null;
@@ -268,21 +272,9 @@ export class WorldScene extends Phaser.Scene {
   private tetherGfx!: Phaser.GameObjects.Graphics;
 
   // Cinema loop — idle NPCs head to the Cinema and sit on a seat.
-  // Replaced the old wanderTick (which moved NPCs to random rooms for no
-  // reason). NPCs now only move for real activity OR to/from the cinema.
   private idleSitTimer: Phaser.Time.TimerEvent | null = null;
-  // Last time an NPC did something real (tool activity or summon). Used to
-  // gate the cinema loop — we only send them to the cinema after a quiet
-  // window, so we don't yank a just-walked NPC back.
+  // Last time an NPC did something real (tool activity or summon).
   private lastActivityAt = new Map<string, number>();
-  // Claimed cinema seats: npcId -> seat key. A seat key is "col,row".
-  private occupiedSeats = new Map<string, string>();
-  // Inverse lookup so we can release a seat without scanning.
-  private seatByNpc = new Map<string, SeatCell>();
-  // Pixel-precise final position for an in-progress walkNpcToCell.
-  // Used to land sprites on the seat's authored center instead of
-  // the tile center on the LAST step of the path. Cleared on arrival.
-  private npcSeatOffset = new Map<string, { px: number; py: number }>();
   // Counter-state for each summon tick so we only act on increments.
   private lastSeenSummonTicks: Record<string, number> = {};
 
@@ -442,10 +434,29 @@ export class WorldScene extends Phaser.Scene {
     // the LOADER_COMPLETE event.
     const bundle = await loadInteriorZone();
     this.zone = bundle.zone;
-    // Cache the authored seat cells so claimFreeSeat / tickIdleSit / the
-    // post-spawn flow can look them up without re-reading the manifest.
-    this.seatCells = bundle.parsed.seatCells.slice();
-    this.deskRects = bundle.parsed.deskRects.slice();
+    // Initialize seat + movement system from the authored map data.
+    this.seatMgr.init(bundle.parsed.seatCells.slice(), bundle.parsed.deskRects.slice());
+    this.director = new MovementDirector({
+      scene: this,
+      seatManager: this.seatMgr,
+      callbacks: {
+        getNpc: (id) => this.getNpcHandle(id),
+        getAllNpcIds: () => [...this.npcs.keys()],
+        isWalkable: (col, row) => this.isWalkableHere(col, row),
+        onArrived: (id, _col, _row, _room) => {
+          const npc = this.npcs.get(id);
+          if (npc) this.playIdleAnim(npc);
+        },
+        playIdleAnim: (handle) => {
+          const npc = this.npcs.get(handle.id);
+          if (npc) this.playIdleAnim(npc);
+        },
+        startChoreo: (handle, kind) => {
+          const npc = this.npcs.get(handle.id);
+          if (npc) this.startChoreoFor(npc, kind as ChoreoKind);
+        },
+      },
+    });
     // Snapshot the raw Tiled objects so the debug overlay can outline
     // every authored rect (rooms, seats, decor, collision) without
     // re-fetching the .tmj.
@@ -458,7 +469,7 @@ export class WorldScene extends Phaser.Scene {
       collidable: o.collidable,
       seat: o.seat,
     }));
-    if (this.seatCells.length === 0 && typeof window !== "undefined") {
+    if (this.seatMgr.totalSeats === 0 && typeof window !== "undefined") {
       console.warn(
         `[world] no seat objects in the .tmj — agents won't claim a desk after spawn.`,
       );
@@ -592,13 +603,11 @@ export class WorldScene extends Phaser.Scene {
       this.unsubscribeSettings = null;
       this.worldLifeLastToolAt.clear();
       // Clear all scene-local state. scene.restart() reuses the same
-      // instance so class-field maps persist across restarts — an old
-      // walk path targeting a now-destroyed sprite crashes tickNpcPaths.
-      this.npcPaths.clear();
+      // instance so class-field maps persist across restarts.
+      this.director?.destroy();
+      this.seatMgr.reset();
       this.npcs.clear();
-      this.occupiedSeats.clear();
-      this.seatByNpc.clear();
-      this.npcSeatOffset.clear();
+      this.npcHandleCache.clear();
       this.lastActivityAt.clear();
     });
   }
@@ -609,43 +618,9 @@ export class WorldScene extends Phaser.Scene {
   // random-wander loop so NPCs only move for a concrete reason.
   // --------------------------------------------------------------------
 
-  // Live list of seat cells, populated from `parsed.seatCells` (objects
-  // with `seat: true` in the .tmj). Set in create() once the map loads;
-  // empty until then so claimFreeSeat is a no-op pre-load. The 60s-idle
-  // cinema loop and the post-spawn assignment both walk this list.
-  private seatCells: SeatCell[] = [];
-  // Cell-coord bounds of every "Desk" object — read at seat-snap time
-  // so a seated agent faces the nearest desk instead of the camera.
-  private deskRects: DeskRect[] = [];
 
-  /** Pick which way a seated agent should face. We look for the
-   *  nearest desk rect to the seat cell and return up/down/left/right
-   *  based on the dominant axis. Falls back to "up" (the dominant
-   *  layout in the authored map) when no desks exist. */
   private deskFacingFor(col: number, row: number): Direction {
-    if (this.deskRects.length === 0) return "up";
-    const cx = col + 0.5;
-    const cy = row + 0.5;
-    let best: DeskRect | null = null;
-    let bestDist = Infinity;
-    for (const d of this.deskRects) {
-      const dcx = (d.colMin + d.colMax + 1) / 2;
-      const dcy = (d.rowMin + d.rowMax + 1) / 2;
-      const dx = dcx - cx;
-      const dy = dcy - cy;
-      const dist = dx * dx + dy * dy;
-      if (dist < bestDist) {
-        bestDist = dist;
-        best = d;
-      }
-    }
-    if (!best) return "up";
-    const dcx = (best.colMin + best.colMax + 1) / 2;
-    const dcy = (best.rowMin + best.rowMax + 1) / 2;
-    const dx = dcx - cx;
-    const dy = dcy - cy;
-    if (Math.abs(dx) > Math.abs(dy)) return dx > 0 ? "right" : "left";
-    return dy > 0 ? "down" : "up";
+    return this.seatMgr.deskFacingFor(col, row);
   }
 
   private startIdleSitLoop() {
@@ -764,33 +739,31 @@ export class WorldScene extends Phaser.Scene {
 
     for (const npc of this.npcs.values()) {
       // Already mid-path? Leave them alone.
-      if (this.npcPaths.has(npc.def.id)) continue;
+      if (this.director?.hasPlan(npc.def.id)) continue;
       // Already seated?
-      if (this.seatByNpc.has(npc.def.id)) continue;
+      if (this.seatMgr.isSeated(npc.def.id)) continue;
       // Not idle long enough yet.
       const last = this.lastActivityAt.get(npc.def.id) ?? 0;
       if (last !== 0 && now - last < IDLE_MS) continue;
       // Sub-agents follow their parent; don't drag them to the lounge.
       if ((npc.def as { parentId?: string }).parentId) continue;
 
-      // Prefer routing idle agents to the lounge (coffee bar) — feels
-      // more alive than every agent silently snapping back to a desk.
-      // Fall back to a free seat if the map has no lounge anchor.
-      if (loungeAvailable) {
+      // Prefer claiming a lounge seat (coffee bar stool) so the agent
+      // lands on the actual chair sprite instead of the room anchor.
+      // Fall back to any free seat, then to walkNpcToRoom as last resort.
+      const seat = loungeAvailable
+        ? this.claimFreeSeatInRoom(npc.def.id, "lounge") ?? this.claimFreeSeat(npc.def.id)
+        : this.claimFreeSeat(npc.def.id);
+      if (seat) {
+        this.walkNpcToCell(npc.def.id, seat.col, seat.row, {
+          px: seat.px,
+          py: seat.py,
+        });
+      } else if (loungeAvailable) {
         this.walkNpcToRoom(npc.def.id, "lounge");
-        if (!this.lastActivityAt.has(npc.def.id)) {
-          this.lastActivityAt.set(npc.def.id, now);
-        }
+      } else {
         continue;
       }
-
-      const seat = this.claimFreeSeat(npc.def.id);
-      if (!seat) continue;
-
-      this.walkNpcToCell(npc.def.id, seat.col, seat.row, {
-        px: seat.px,
-        py: seat.py,
-      });
       // Record an activity timestamp at the cinema-departure moment so the
       // loop doesn't immediately re-fire for the next NPC on the same tick
       // that happens to land on the same quiet threshold.
@@ -801,23 +774,16 @@ export class WorldScene extends Phaser.Scene {
   }
 
   private claimFreeSeat(npcId: string): SeatCell | null {
-    for (const seat of this.seatCells) {
-      const key = `${seat.col},${seat.row}`;
-      if (this.occupiedSeats.has(key)) continue;
-      this.occupiedSeats.set(key, npcId);
-      this.seatByNpc.set(npcId, seat);
-      return seat;
-    }
-    return null;
+    return this.seatMgr.claimFreeSeat(npcId);
+  }
+
+  private claimFreeSeatInRoom(npcId: string, room: RoomId): SeatCell | null {
+    return this.seatMgr.claimFreeSeatInRoom(npcId, room);
   }
 
   private releaseSeat(npcId: string) {
-    const seat = this.seatByNpc.get(npcId);
+    const seat = this.seatMgr.releaseSeat(npcId);
     if (!seat) return;
-    this.seatByNpc.delete(npcId);
-    this.occupiedSeats.delete(`${seat.col},${seat.row}`);
-    // Restore the standing texture so the next walk anim plays from
-    // the run sheet rather than the seated one.
     const npc = this.npcs.get(npcId);
     if (npc?.sprite?.scene && npc.sprite.texture.key !== npc.animKey) {
       try {
@@ -894,14 +860,6 @@ export class WorldScene extends Phaser.Scene {
     this.walkNpcToCell(id, target.col, target.row);
   }
 
-  /**
-   * Like walkNpcToRoom but targets an arbitrary cell. Used by the cinema
-   * loop (targets seats) and by summonNpc (targets tiles near the player).
-   *
-   * If `finalOffset` is supplied, the LAST step of the path lands on
-   * the offset's pixel center instead of the tile center — used so
-   * sprites rest on the actual chair art rather than near it.
-   */
   private walkNpcToCell(
     npcId: string,
     targetCol: number,
@@ -910,76 +868,38 @@ export class WorldScene extends Phaser.Scene {
   ) {
     const npc = this.npcs.get(npcId);
     if (!npc) return;
+    this.director?.moveToCell(npcId, targetCol, targetRow, finalOffset ? { px: finalOffset.px, py: finalOffset.py } : undefined);
+  }
 
-    const blocked: Array<{ col: number; row: number }> = [];
-    for (const other of this.npcs.values()) {
-      if (other.def.id === npcId) continue;
-      blocked.push({ col: other.col, row: other.row });
+  private getNpcHandle(id: string): NpcHandle | undefined {
+    const npc = this.npcs.get(id);
+    if (!npc) {
+      this.npcHandleCache.delete(id);
+      return undefined;
     }
-    const path = bfs(npc.col, npc.row, targetCol, targetRow, { blocked });
-    if (path.length <= 1) {
-      // Already in the target cell. Slide (don't snap) onto the chair's
-      // authored pixel center so the move reads as a step, not a
-      // teleport. Skip the tween if we're already on the offset.
-      if (finalOffset) {
-        const fromX = npc.sprite.x;
-        const fromY = npc.sprite.y;
-        const dx = finalOffset.px - fromX;
-        const dy = finalOffset.py - fromY;
-        const facing = this.deskFacingFor(targetCol, targetRow);
-        npc.facing = facing;
-        const applySeatedPose = () => {
-          try {
-            npc.sprite.stop();
-            // Use the idle sheet's first frame for the chosen direction.
-            npc.sprite.setTexture(npc.idleAnimKey, IDLE_FRAME[facing][0]);
-          } catch {
-            // ignore
-          }
-        };
-        if (dx * dx + dy * dy < 0.25) {
-          // Sub-pixel difference — no tween needed.
-          applySeatedPose();
-        } else {
-          // Cancel any in-flight tween on this sprite to avoid a fight.
-          this.tweens.killTweensOf(npc.sprite);
-          this.tweens.killTweensOf(npc.shadow);
-          this.tweens.add({
-            targets: npc.sprite,
-            x: finalOffset.px,
-            y: finalOffset.py,
-            duration: STEP_DURATION_MS,
-            ease: "Linear",
-            onComplete: applySeatedPose,
-          });
-          this.tweens.add({
-            targets: npc.shadow,
-            x: finalOffset.px,
-            y: finalOffset.py + 7,
-            duration: STEP_DURATION_MS,
-            ease: "Linear",
-          });
-        }
-        logAgent({
-          ts: Date.now(),
-          scene: this.time.now,
-          agentId: npcId,
-          kind: "seat-snap",
-          fromX,
-          fromY,
-          toX: finalOffset.px,
-          toY: finalOffset.py,
-          note: `already-at-cell offset slide (face ${facing})`,
-        });
-      }
-      return;
-    }
-    this.npcPaths.set(npcId, path.slice(1));
-    if (finalOffset) {
-      this.npcSeatOffset.set(npcId, finalOffset);
-    } else {
-      this.npcSeatOffset.delete(npcId);
-    }
+    let handle = this.npcHandleCache.get(id);
+    if (handle) return handle;
+    handle = {
+      id,
+      get col() { return npc.col; },
+      set col(v) { npc.col = v; },
+      get row() { return npc.row; },
+      set row(v) { npc.row = v; },
+      get facing() { return npc.facing; },
+      set facing(v) { npc.facing = v; },
+      sprite: npc.sprite,
+      shadow: npc.shadow,
+      get indicator() { return npc.indicator; },
+      get overheadContainer() { return npc.overheadContainer; },
+      get tween() { return npc.tween; },
+      set tween(v) { npc.tween = v; },
+      animKey: npc.animKey,
+      idleAnimKey: npc.idleAnimKey,
+      get transitTarget() { return npc.transitTarget; },
+      set transitTarget(v) { npc.transitTarget = v; },
+    };
+    this.npcHandleCache.set(id, handle);
+    return handle;
   }
 
   // --------------------------------------------------------------------
@@ -1339,17 +1259,19 @@ export class WorldScene extends Phaser.Scene {
       // Real tool in flight — route to its room.
       this.lastActivityAt.set(def.id, this.time.now);
       this.walkNpcToRoom(def.id, pending.room);
-      const pathLen = this.npcPaths.get(def.id)?.length ?? 0;
-      this.time.delayedCall(pathLen * STEP_DURATION_MS + 40, () => {
-        const live = this.npcs.get(def.id);
-        if (!live) return;
-        this.startChoreoFor(live, pending.choreo);
-        this.updateOverheadPill(
-          def.id,
-          pendingTool,
-          pending.event.state,
-          false,
-        );
+      this.time.delayedCall(200, () => {
+        const waitForArrival = this.time.addEvent({
+          delay: STEP_DURATION_MS,
+          loop: true,
+          callback: () => {
+            if (this.director?.hasPlan(def.id)) return;
+            waitForArrival.remove(false);
+            const live = this.npcs.get(def.id);
+            if (!live) return;
+            this.startChoreoFor(live, pending.choreo);
+            this.updateOverheadPill(def.id, pendingTool, pending.event.state, false);
+          },
+        });
       });
     } else if (dynamicTopLevel) {
       // No real tool yet — claim a free seat and walk there. Sub-
@@ -1362,7 +1284,7 @@ export class WorldScene extends Phaser.Scene {
         });
       } else if (typeof window !== "undefined") {
         console.warn(
-          `[world] no free seat for ${def.id} — ${this.occupiedSeats.size}/${this.seatCells.length} seats taken. Falling back to spawn cell.`,
+          `[world] no free seat for ${def.id} — ${this.seatMgr.occupiedCount}/${this.seatMgr.totalSeats} seats taken. Falling back to spawn cell.`,
         );
         this.walkNpcToCell(def.id, targetCol, targetRow);
       } else {
@@ -1474,8 +1396,8 @@ export class WorldScene extends Phaser.Scene {
     this.persistedMugs.get(id)?.destroy();
     this.persistedMugs.delete(id);
     this.npcs.delete(id);
-    this.npcPaths.delete(id);
-    this.npcSeatOffset.delete(id);
+    this.npcHandleCache.delete(id);
+    this.director?.cancelMovement(id);
     // World-life v2: drop the FSM entry so a later re-spawn starts
     // clean. No-op when the flag is off (worldLifeDebug is empty).
     worldLifeDebug.forget(id);
@@ -1802,22 +1724,26 @@ export class WorldScene extends Phaser.Scene {
           continue;
         }
 
-        const pathLen = this.npcPaths.get(agentId)?.length ?? 0;
-        const walkMs = pathLen * 160 + 40;
-        this.time.delayedCall(walkMs, () => {
-          const live = this.npcs.get(agentId);
-          if (!live) return;
-          this.startChoreoFor(live, act.choreo);
-          if (behaviorId === "task") {
-            const subagentType =
-              ((act.event.metadata as { subagentType?: string } | undefined)
-                ?.subagentType) ||
-              ((act.event.metadata as { input?: Record<string, unknown> } | undefined)
-                ?.input as { subagent_type?: string } | undefined)?.subagent_type;
-            this.spawnHelperFor(live, subagentType);
-          } else if (live.helper) {
-            this.despawnHelper(live);
-          }
+        const waitForWalk = this.time.addEvent({
+          delay: STEP_DURATION_MS,
+          loop: true,
+          callback: () => {
+            if (this.director?.hasPlan(agentId)) return;
+            waitForWalk.remove(false);
+            const live = this.npcs.get(agentId);
+            if (!live) return;
+            this.startChoreoFor(live, act.choreo);
+            if (behaviorId === "task") {
+              const subagentType =
+                ((act.event.metadata as { subagentType?: string } | undefined)
+                  ?.subagentType) ||
+                ((act.event.metadata as { input?: Record<string, unknown> } | undefined)
+                  ?.input as { subagent_type?: string } | undefined)?.subagent_type;
+              this.spawnHelperFor(live, subagentType);
+            } else if (live.helper) {
+              this.despawnHelper(live);
+            }
+          },
         });
       }
     });
@@ -1869,7 +1795,7 @@ export class WorldScene extends Phaser.Scene {
   // per-frame
   // --------------------------------------------------------------------
   update(_time: number, _delta: number) {
-    this.tickNpcPaths();
+    this.director?.tick();
     this.tickChoreoDecay();
     this.tickFollowCamera();
     this.tickSpriteSeparation();
@@ -1894,7 +1820,7 @@ export class WorldScene extends Phaser.Scene {
       // Skip mid-step tweens (the walk owns the position) and seated
       // agents (they occupy a fixed pixel offset on the chair).
       if (a.tween) continue;
-      if (this.seatByNpc.has(aId)) continue;
+      if (this.seatMgr.isSeated(aId)) continue;
       let dx = 0;
       let dy = 0;
       for (const [bId, b] of this.npcs) {
@@ -1995,8 +1921,8 @@ export class WorldScene extends Phaser.Scene {
     // toward the desk the seated agent will face, with a chevron head.
     const ARROW_LEN = 12;
     const HEAD = 4;
-    for (const seat of this.seatCells) {
-      const facing = this.deskFacingFor(seat.col, seat.row);
+    for (const seat of this.seatMgr.allSeatCells) {
+      const facing = seat.orientation ?? this.seatMgr.deskFacingFor(seat.col, seat.row);
       const sx = seat.px;
       const sy = seat.py;
       const dx = facing === "left" ? -1 : facing === "right" ? 1 : 0;
@@ -2225,74 +2151,7 @@ export class WorldScene extends Phaser.Scene {
   walkNpcToRoom(npcId: string, room: RoomId) {
     const npc = this.npcs.get(npcId);
     if (!npc) return;
-    const anchor = ROOM_ANCHORS[room];
-    logAgent({
-      ts: Date.now(),
-      scene: this.time.now,
-      agentId: npcId,
-      kind: "summon",
-      fromCol: npc.col,
-      fromRow: npc.row,
-      toCol: anchor.col,
-      toRow: anchor.row,
-      note: `route to room=${room}`,
-    });
-
-    // Find a free tile near the anchor — anchor itself or adjacent
-    let target = { col: anchor.col, row: anchor.row };
-    let targetFound =
-      this.isWalkableHere(target.col, target.row) &&
-      !this.isEntityAt(target.col, target.row, npcId);
-    if (!targetFound) {
-      const candidates = [
-        [anchor.col + 1, anchor.row],
-        [anchor.col - 1, anchor.row],
-        [anchor.col, anchor.row + 1],
-        [anchor.col, anchor.row - 1],
-      ];
-      for (const [c, r] of candidates) {
-        if (this.isWalkableHere(c, r) && !this.isEntityAt(c, r, npcId)) {
-          target = { col: c, row: r };
-          targetFound = true;
-          break;
-        }
-      }
-    }
-    // Anchor cluster fully blocked — scan the whole room rect for any
-    // walkable, unoccupied cell. Without this, a crowded room silently
-    // refuses new arrivals and they freeze in the corridor.
-    if (!targetFound) {
-      const region = getRoomRegions().find((r) => r.id === room);
-      if (region) {
-        outer: for (let r = region.rowMin; r <= region.rowMax; r++) {
-          for (let c = region.colMin; c <= region.colMax; c++) {
-            if (this.isWalkableHere(c, r) && !this.isEntityAt(c, r, npcId)) {
-              target = { col: c, row: r };
-              targetFound = true;
-              break outer;
-            }
-          }
-        }
-      }
-      if (!targetFound) {
-        console.warn(
-          `[walkNpcToRoom] room "${room}" is full — ${npcId} stays put`,
-        );
-        return;
-      }
-    }
-
-    const blocked: Array<{ col: number; row: number }> = [];
-    for (const other of this.npcs.values()) {
-      if (other.def.id === npcId) continue;
-      blocked.push({ col: other.col, row: other.row });
-    }
-    const path = bfs(npc.col, npc.row, target.col, target.row, { blocked });
-    if (path.length <= 1) return;
-    this.npcPaths.set(npcId, path.slice(1));
-    // Stash the destination room on the entity so the transit badge
-    // ("→ Library") can render until the path drains.
-    npc.transitTarget = room;
+    this.director?.moveToRoom(npcId, room);
   }
 
   private isEntityAt(col: number, row: number, exceptNpcId?: string): boolean {
@@ -2303,152 +2162,6 @@ export class WorldScene extends Phaser.Scene {
     return false;
   }
 
-  private tickNpcPaths() {
-    for (const [id, path] of this.npcPaths) {
-      const npc = this.npcs.get(id);
-      // Defensive: if the npc entry is gone, or its sprite was destroyed
-      // (e.g. by a mid-flight scene restart or a late tween onComplete
-      // that ran after removeNpcEntity), drop the path. `sprite.active`
-      // is Phaser's "is this game object still usable" flag.
-      if (!npc || !npc.sprite || !npc.sprite.scene) {
-        this.npcPaths.delete(id);
-        continue;
-      }
-      if (npc.tween) continue; // mid-step
-      const next = path.shift();
-      if (!next) {
-        this.npcPaths.delete(id);
-        npc.transitTarget = undefined;
-        try {
-          // Drop into the per-character idle loop so the agent looks
-          // alive at rest instead of holding a single frame.
-          this.playIdleAnim(npc);
-        } catch {
-          // sprite torn down while we were iterating — ignore
-        }
-        continue;
-      }
-      // Path could have become invalid if the player stepped into it — retry later
-      if (this.isEntityAt(next.col, next.row, id)) {
-        path.unshift(next);
-        logAgent({
-          ts: Date.now(),
-          scene: this.time.now,
-          agentId: id,
-          kind: "walk-step-skip",
-          fromCol: npc.col,
-          fromRow: npc.row,
-          toCol: next.col,
-          toRow: next.row,
-          note: "tile occupied; will retry",
-        });
-        continue;
-      }
-      const dc = next.col - npc.col;
-      const dr = next.row - npc.row;
-      const dir: Direction = dc > 0 ? "right" : dc < 0 ? "left" : dr > 0 ? "down" : "up";
-      npc.facing = dir;
-      npc.sprite.play(`${npc.animKey}-walk-${dir}`, true);
-      // On the LAST step of a seat-bound path, prefer the seat's
-      // authored pixel center (via npcSeatOffset). Cleared on arrival.
-      const isLastStep = path.length === 0;
-      const offset = isLastStep ? this.npcSeatOffset.get(id) : undefined;
-      const targetX = offset
-        ? offset.px
-        : next.col * TILE_SIZE + TILE_SIZE / 2;
-      const targetY = offset
-        ? offset.py
-        : next.row * TILE_SIZE + TILE_SIZE / 2;
-      const stepFromX = npc.sprite.x;
-      const stepFromY = npc.sprite.y;
-      const stepFromCol = npc.col;
-      const stepFromRow = npc.row;
-      logAgent({
-        ts: Date.now(),
-        scene: this.time.now,
-        agentId: id,
-        kind: "walk-step-start",
-        fromCol: stepFromCol,
-        fromRow: stepFromRow,
-        toCol: next.col,
-        toRow: next.row,
-        fromX: stepFromX,
-        fromY: stepFromY,
-        toX: targetX,
-        toY: targetY,
-        note: offset ? `seat-offset px=(${offset.px},${offset.py})` : undefined,
-      });
-      npc.tween = this.tweens.add({
-        targets: npc.sprite,
-        x: targetX,
-        y: targetY,
-        duration: STEP_DURATION_MS,
-        ease: "Linear",
-        onComplete: () => {
-          npc.col = next.col;
-          npc.row = next.row;
-          npc.sprite.setDepth(1000 + next.row);
-          npc.tween = undefined;
-          logAgent({
-            ts: Date.now(),
-            scene: this.time.now,
-            agentId: id,
-            kind: "walk-step-end",
-            fromCol: stepFromCol,
-            fromRow: stepFromRow,
-            toCol: next.col,
-            toRow: next.row,
-            toX: npc.sprite.x,
-            toY: npc.sprite.y,
-          });
-          if (offset) {
-            // Face the nearest desk so seated agents look at their
-            // workstation instead of the last step's incoming axis.
-            const facing = this.deskFacingFor(next.col, next.row);
-            npc.facing = facing;
-            try {
-              npc.sprite.stop();
-              // Use the idle sheet's first frame in the chosen direction.
-              // The dedicated sit sheet is single-direction so it can't
-              // express "facing the desk"; the idle sheet has all 4.
-              npc.sprite.setTexture(npc.idleAnimKey, IDLE_FRAME[facing][0]);
-            } catch {
-              // sprite torn down mid-tween — ignore
-            }
-            this.npcSeatOffset.delete(id);
-            // Sit-down choreo: brief settle + breathing yoyo so the
-            // seated pose reads as intentional rather than frozen.
-            this.startChoreoFor(npc, "sit-down");
-          }
-        },
-      });
-      this.tweens.add({
-        targets: npc.shadow,
-        x: targetX,
-        y: targetY + 7,
-        duration: STEP_DURATION_MS,
-        ease: "Linear",
-      });
-      if (npc.indicator) {
-        this.tweens.add({
-          targets: npc.indicator,
-          x: targetX,
-          y: targetY - 14,
-          duration: STEP_DURATION_MS,
-          ease: "Linear",
-        });
-      }
-      if (npc.overheadContainer) {
-        this.tweens.add({
-          targets: npc.overheadContainer,
-          x: targetX,
-          y: targetY - 20,
-          duration: STEP_DURATION_MS,
-          ease: "Linear",
-        });
-      }
-    }
-  }
 
   // --------------------------------------------------------------------
   // misc
@@ -2492,7 +2205,7 @@ export class WorldScene extends Phaser.Scene {
       }
       entity.choreo = undefined;
     }
-    const handle = startChoreo(this, { sprite: entity.sprite }, kind);
+    const handle = startChoreo(this, { sprite: entity.sprite }, kind, entity.facing);
     entity.choreo = { kind, handle, startedAt: this.time.now };
   }
 
@@ -2671,7 +2384,7 @@ export class WorldScene extends Phaser.Scene {
         // Stage 3: idle micro-animations controller.
         this.idleAnimCtrl = new IdleAnimController(this, {
           spriteFor: (id) => this.npcs.get(id)?.sprite,
-          isSeated: (id) => this.seatByNpc.has(id),
+          isSeated: (id) => this.seatMgr.isSeated(id),
           roomFor: (id) => {
             const npc = this.npcs.get(id);
             if (!npc) return null;
@@ -2681,7 +2394,7 @@ export class WorldScene extends Phaser.Scene {
             const npc = this.npcs.get(id);
             if (!npc) return true;
             // Suspended when: walking, has active choreo, in dialog, or selected
-            if (this.npcPaths.has(id)) return true;
+            if (this.director?.hasPlan(id)) return true;
             if (npc.choreo) return true;
             const state = worldLifeDebug.states[id];
             if (state === "IN_DIALOG" || state === "SUMMONED" || state === "TRAVELING" || state === "ACTIVE_TOOL") return true;
@@ -2759,7 +2472,7 @@ export class WorldScene extends Phaser.Scene {
       if (this.worldLifeTimer && !this.idleAnimCtrl) {
         this.idleAnimCtrl = new IdleAnimController(this, {
           spriteFor: (id) => this.npcs.get(id)?.sprite,
-          isSeated: (id) => this.seatByNpc.has(id),
+          isSeated: (id) => this.seatMgr.isSeated(id),
           roomFor: (id) => {
             const npc = this.npcs.get(id);
             if (!npc) return null;
@@ -2768,7 +2481,7 @@ export class WorldScene extends Phaser.Scene {
           isSuspended: (id) => {
             const npc = this.npcs.get(id);
             if (!npc) return true;
-            if (this.npcPaths.has(id)) return true;
+            if (this.director?.hasPlan(id)) return true;
             if (npc.choreo) return true;
             const state = worldLifeDebug.states[id];
             if (state === "IN_DIALOG" || state === "SUMMONED" || state === "TRAVELING" || state === "ACTIVE_TOOL") return true;
@@ -3072,8 +2785,7 @@ export class WorldScene extends Phaser.Scene {
           callback: () => {
             const e = this.npcs.get(npcId);
             if (!e) { check.remove(false); reject(); return; }
-            const path = this.npcPaths.get(npcId);
-            if (!path || path.length === 0) {
+            if (!this.director?.hasPlan(npcId)) {
               check.remove(false);
               resolve();
             }
@@ -3116,8 +2828,7 @@ export class WorldScene extends Phaser.Scene {
           callback: () => {
             const e = this.npcs.get(npcId);
             if (!e) { check.remove(false); reject(); return; }
-            const path = this.npcPaths.get(npcId);
-            if (!path || path.length === 0) {
+            if (!this.director?.hasPlan(npcId)) {
               check.remove(false);
               resolve();
             }
@@ -3132,7 +2843,7 @@ export class WorldScene extends Phaser.Scene {
     };
 
     const getHomeSeat = () => {
-      const seat = this.seatByNpc.get(npcId);
+      const seat = this.seatMgr.getSeat(npcId);
       return seat ? { col: seat.col, row: seat.row } : getPos();
     };
 
