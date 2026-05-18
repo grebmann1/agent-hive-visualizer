@@ -64,6 +64,8 @@ const EMOJI_FOR_CHOREO: Partial<Record<ChoreoKind, string>> = {
   // "idle-bob" has no floating emoji.
 };
 
+export type Direction = "up" | "down" | "left" | "right";
+
 export interface ChoreoTarget {
   sprite: Phaser.GameObjects.Sprite;
 }
@@ -78,15 +80,26 @@ const FRAME_UP_0 = 2;
 const FRAME_LEFT_0 = 4;
 const FRAME_RIGHT_0 = 6;
 
+const FRAME_FOR_FACING: Record<Direction, number> = {
+  down: FRAME_DOWN_0,
+  up: FRAME_UP_0,
+  left: FRAME_LEFT_0,
+  right: FRAME_RIGHT_0,
+};
+
 /**
  * Start a choreo on a sprite. Returns a handle whose `stop()` tears down
  * every side-effect (tweens, floating emojis, timers). Safe to call stop()
  * more than once.
+ *
+ * `facing` — if provided, desk-oriented choreos (typing, hammering, browsing)
+ * will use this direction instead of hardcoding "down".
  */
 export function startChoreo(
   scene: Phaser.Scene,
   target: ChoreoTarget,
   kind: ChoreoKind,
+  facing?: Direction,
 ): ChoreoHandle {
   const sprite = target.sprite;
   const tweens: Phaser.Tweens.Tween[] = [];
@@ -214,7 +227,7 @@ export function startChoreo(
 
     case "typing": {
       // Faces the desk. Rapid scaleY pulse to read as "tapping keys".
-      setFrameIfExists(FRAME_DOWN_0);
+      setFrameIfExists(FRAME_FOR_FACING[facing ?? "down"]);
       tweens.push(
         scene.tweens.add({
           targets: sprite,
@@ -232,7 +245,7 @@ export function startChoreo(
     case "hammering": {
       // At the anvil. Strong scaleY pulse reads as swinging a hammer without
       // actually moving the sprite position (which would fight walk tweens).
-      setFrameIfExists(FRAME_DOWN_0);
+      setFrameIfExists(FRAME_FOR_FACING[facing ?? "down"]);
       tweens.push(
         scene.tweens.add({
           targets: sprite,
@@ -266,7 +279,7 @@ export function startChoreo(
     }
 
     case "browsing": {
-      setFrameIfExists(FRAME_DOWN_0);
+      setFrameIfExists(FRAME_FOR_FACING[facing ?? "down"]);
       tweens.push(
         scene.tweens.add({
           targets: sprite,

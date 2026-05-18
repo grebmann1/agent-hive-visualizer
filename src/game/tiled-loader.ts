@@ -36,6 +36,8 @@ export interface TileGrid {
   data: number[]; // row-major; gid 0 = empty
 }
 
+export type SeatOrientation = "up" | "down" | "left" | "right";
+
 export interface ObjectRect {
   /** True if `collidable` property is true. False rects are render-only or markers. */
   collidable: boolean;
@@ -48,6 +50,8 @@ export interface ObjectRect {
   y: number;
   width: number;
   height: number;
+  /** Authored facing direction for seat objects. */
+  orientation?: SeatOrientation;
 }
 
 // Imported only as a type so RoomId stays in events/types and we don't
@@ -80,6 +84,7 @@ export interface CellCoord {
 export interface SeatCell extends CellCoord {
   px: number;
   py: number;
+  orientation?: SeatOrientation;
 }
 
 export interface DeskRect {
@@ -354,7 +359,16 @@ async function fetchAndParse(url: string): Promise<ParsedMap> {
       const seatProp = props.some(
         (p) => p.name === "seat" && p.value === true,
       );
+      const orientationRaw = props.find(
+        (p) => p.name === "orientation" && typeof p.value === "string",
+      )?.value as string | undefined;
+      const orientation: SeatOrientation | undefined =
+        orientationRaw &&
+        (["up", "down", "left", "right"] as string[]).includes(orientationRaw)
+          ? (orientationRaw as SeatOrientation)
+          : undefined;
       const name = o.name ?? "";
+      const SEAT_NAMES = ["seat", "coffeeseat", "loungeseat", "meetingseat", "devopsseat"];
       objects.push({
         name,
         x: o.x + dx,
@@ -362,7 +376,8 @@ async function fetchAndParse(url: string): Promise<ParsedMap> {
         width: o.width,
         height: o.height,
         collidable,
-        seat: seatProp || name.toLowerCase() === "seat",
+        seat: seatProp || SEAT_NAMES.includes(name.toLowerCase()),
+        orientation,
       });
     }
   }
@@ -444,7 +459,7 @@ function deriveSeatCells(
     const key = `${col},${row}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push({ col, row, px: cx, py: cy });
+    out.push({ col, row, px: cx, py: cy, orientation: obj.orientation });
   }
   return out;
 }
@@ -468,6 +483,7 @@ function deriveDeskRects(
   }
   return out;
 }
+
 
 /** Derive RoomAnchorRects from named objects whose names match
  *  ROOM_NAME_TO_ID. The anchor is a walkable cell near the rect's
