@@ -77,6 +77,14 @@ export interface CellCoord {
   row: number;
 }
 
+/** A seat's authored category, derived from the Tiled object name.
+ *  "home" — generic Desk/Seat workstations, used for stable per-agent
+ *           home-desk assignment.
+ *  "lounge" / "coffee" / "meeting" / "devops" — opportunistic seats
+ *           claimed dynamically (e.g. an agent on break grabs any
+ *           free coffee stool, not "their" coffee stool). */
+export type SeatCategory = "home" | "lounge" | "coffee" | "meeting" | "devops";
+
 /** A seat object: cell-coords for pathfinding plus the authored
  *  pixel-center so the sprite can land exactly on the chair sprite
  *  (which is usually smaller than a tile and pixel-aligned to one
@@ -85,6 +93,7 @@ export interface SeatCell extends CellCoord {
   px: number;
   py: number;
   orientation?: SeatOrientation;
+  category: SeatCategory;
 }
 
 export interface DeskRect {
@@ -459,9 +468,30 @@ function deriveSeatCells(
     const key = `${col},${row}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push({ col, row, px: cx, py: cy, orientation: obj.orientation });
+    out.push({
+      col,
+      row,
+      px: cx,
+      py: cy,
+      orientation: obj.orientation,
+      category: seatCategoryForName(obj.name),
+    });
   }
   return out;
+}
+
+/** Map an authored Tiled object name onto a SeatCategory. Generic
+ *  "Seat"/anonymous rects become "home" — those are the per-agent
+ *  workstations. Named variants (CoffeeSeat, LoungeSeat, MeetingSeat,
+ *  DevOpsSeat) keep their authored category so they can be claimed
+ *  opportunistically (lounge break, meeting cluster, etc). */
+function seatCategoryForName(rawName: string): SeatCategory {
+  const n = rawName.toLowerCase();
+  if (n === "coffeeseat") return "coffee";
+  if (n === "loungeseat") return "lounge";
+  if (n === "meetingseat") return "meeting";
+  if (n === "devopsseat") return "devops";
+  return "home";
 }
 
 /** Convert each `Desk` object to its cell-coord bounds. Decor only. */

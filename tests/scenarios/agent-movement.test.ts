@@ -217,7 +217,7 @@ describe("Scenario 1: Agent arrives, walks to desk, sits facing monitors", () =>
     system = new MovementSystem(ctx, registry);
 
     // Seat at (5,3), desk rect covering (5,4)-(6,5)
-    const seats: SeatCell[] = [{ col: 5, row: 3, px: 5 * 32 + 16, py: 3 * 32 + 16 }];
+    const seats: SeatCell[] = [{ col: 5, row: 3, px: 5 * 32 + 16, py: 3 * 32 + 16, category: "home" }];
     const desks: DeskRect[] = [{ colMin: 5, colMax: 6, rowMin: 4, rowMax: 5 }];
     system.init(seats, desks, () => true);
   });
@@ -305,28 +305,30 @@ describe("Scenario 3: Agent idle, releases seat, walks to lounge", () => {
     system = new MovementSystem(ctx, registry);
 
     const seats: SeatCell[] = [
-      { col: 5, row: 3, px: 5 * 32 + 16, py: 3 * 32 + 16 },
-      { col: 6, row: 3, px: 6 * 32 + 16, py: 3 * 32 + 16 },
+      { col: 5, row: 3, px: 5 * 32 + 16, py: 3 * 32 + 16, category: "home" },
+      { col: 6, row: 3, px: 6 * 32 + 16, py: 3 * 32 + 16, category: "home" },
     ];
     system.init(seats, [], () => true);
   });
 
-  it("releaseSeat frees the seat for another agent", () => {
+  it("releaseSeat frees the slot — another agent can claim some seat", () => {
     const entity = createEntity("agent-1", 5, 3);
     registry._add("agent-1", entity);
 
-    system.claimFreeSeat("agent-1");
+    const first = system.claimFreeSeat("agent-1");
+    expect(first).not.toBeNull();
 
     // Release the seat
     system.releaseSeat("agent-1");
 
-    // Another agent can now claim it
+    // Another agent claims some home seat. With home-desk semantics
+    // the specific cell depends on the hash of "agent-2", but it MUST
+    // succeed — the pool isn't exhausted.
     const entity2 = createEntity("agent-2", 0, 0);
     registry._add("agent-2", entity2);
     const seat = system.claimFreeSeat("agent-2");
     expect(seat).not.toBeNull();
-    expect(seat!.col).toBe(5);
-    expect(seat!.row).toBe(3);
+    expect(seat!.category).toBe("home");
   });
 
   it("walkToRoom emits move:started with room='lounge'", () => {
@@ -357,12 +359,13 @@ describe("Scenario 3: Agent idle, releases seat, walks to lounge", () => {
     system.releaseSeat("agent-1");
     system.walkToRoom("agent-1", "lounge");
 
-    // Seat should be claimable by another agent
+    // Some home seat must be claimable by another agent. The specific
+    // cell depends on the hash of "agent-2".
     const entity2 = createEntity("agent-2", 0, 0);
     registry._add("agent-2", entity2);
     const seat = system.claimFreeSeat("agent-2");
     expect(seat).not.toBeNull();
-    expect(seat!.col).toBe(5);
+    expect(seat!.category).toBe("home");
   });
 });
 
@@ -458,8 +461,8 @@ describe("Scenario 12: Seat exhaustion, fallback to spawn cell", () => {
 
     // Only 2 seats available
     const seats: SeatCell[] = [
-      { col: 3, row: 3, px: 3 * 32 + 16, py: 3 * 32 + 16 },
-      { col: 4, row: 3, px: 4 * 32 + 16, py: 3 * 32 + 16 },
+      { col: 3, row: 3, px: 3 * 32 + 16, py: 3 * 32 + 16, category: "home" },
+      { col: 4, row: 3, px: 4 * 32 + 16, py: 3 * 32 + 16, category: "home" },
     ];
     system.init(seats, [], () => true);
   });

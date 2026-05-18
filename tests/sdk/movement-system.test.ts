@@ -167,8 +167,8 @@ describe("MovementSystem — seat management", () => {
 
   it("claims the first available seat", () => {
     const seats: SeatCell[] = [
-      { col: 3, row: 4, px: 112, py: 144 },
-      { col: 5, row: 6, px: 176, py: 208 },
+      { col: 3, row: 4, px: 112, py: 144, category: "home" },
+      { col: 5, row: 6, px: 176, py: 208, category: "home" },
     ];
     system.init(seats, [], () => true);
 
@@ -179,7 +179,7 @@ describe("MovementSystem — seat management", () => {
   });
 
   it("returns null when all seats are occupied", () => {
-    const seats: SeatCell[] = [{ col: 3, row: 4, px: 112, py: 144 }];
+    const seats: SeatCell[] = [{ col: 3, row: 4, px: 112, py: 144, category: "home" }];
     system.init(seats, [], () => true);
 
     system.claimFreeSeat("agent-1");
@@ -188,7 +188,7 @@ describe("MovementSystem — seat management", () => {
   });
 
   it("release makes a seat available again", () => {
-    const seats: SeatCell[] = [{ col: 3, row: 4, px: 112, py: 144 }];
+    const seats: SeatCell[] = [{ col: 3, row: 4, px: 112, py: 144, category: "home" }];
     system.init(seats, [], () => true);
 
     system.claimFreeSeat("agent-1");
@@ -201,7 +201,7 @@ describe("MovementSystem — seat management", () => {
   });
 
   it("does not double-release or crash on unknown id", () => {
-    const seats: SeatCell[] = [{ col: 3, row: 4, px: 112, py: 144 }];
+    const seats: SeatCell[] = [{ col: 3, row: 4, px: 112, py: 144, category: "home" }];
     system.init(seats, [], () => true);
 
     // Release an id that never claimed — should not throw
@@ -413,7 +413,7 @@ describe("MovementSystem — bus events", () => {
     const entity = mockEntity("npc-1", 5, 5);
     registry._add("npc-1", entity);
 
-    const seats: SeatCell[] = [{ col: 5, row: 5, px: 176, py: 176 }];
+    const seats: SeatCell[] = [{ col: 5, row: 5, px: 176, py: 176, category: "home" }];
     system.init(seats, [], () => true);
     system.claimFreeSeat("npc-1");
 
@@ -531,7 +531,7 @@ describe("MovementSystem — destroy", () => {
     const entity = mockEntity("npc-1", 5, 5);
     registry._add("npc-1", entity);
 
-    const seats: SeatCell[] = [{ col: 5, row: 5, px: 176, py: 176 }];
+    const seats: SeatCell[] = [{ col: 5, row: 5, px: 176, py: 176, category: "home" }];
     system.init(seats, [], () => true);
     system.claimFreeSeat("npc-1");
     injectPath(system, "npc-1", [{ col: 6, row: 5 }]);

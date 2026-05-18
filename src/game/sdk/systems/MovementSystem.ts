@@ -51,7 +51,15 @@ export class MovementSystem {
   private occupiedSeats = new Map<string, string>(); // "col,row" -> npcId
   private seatByNpc = new Map<string, SeatCell>();
 
+  // Stable per-agent home-desk assignment. Keyed by `npc.state.def.id`,
+  // value is one of the `home`-category seats from the .tmj. Survives
+  // releaseSeat() so the agent reclaims the same desk after every tool
+  // event. Cleared only on `npc:removed` so a fresh session can re-roll.
+  private homeSeatByNpc = new Map<string, SeatCell>();
+
   private seatCells: SeatCell[] = [];
+  private homePool: SeatCell[] = []; // category === "home" subset
+  private otherPool: SeatCell[] = []; // every other category
   private deskRects: DeskRect[] = [];
   private walkableFn: (col: number, row: number) => boolean = () => true;
 
@@ -69,6 +77,11 @@ export class MovementSystem {
     this.unsubRemove = this.ctx.bus.on("npc:removed", ({ id }) => {
       this.cancelPath(id);
       this.releaseSeat(id);
+      // Releasing a despawn frees the home-desk slot so a recycled id
+      // (rare) or a brand-new agent can claim it. Live agents keep
+      // their home assignment across releaseSeat() calls — only the
+      // npc:removed bus event triggers this.
+      this.homeSeatByNpc.delete(id);
     });
   }
 
@@ -80,6 +93,12 @@ export class MovementSystem {
     callbacks: MovementCallbacks = {},
   ): void {
     this.seatCells = seatCells;
+    // Partition once at init. `claimFreeSeat` walks the home pool first
+    // (so an agent's home seat is preferred); `claimFreeSeatInRoom`
+    // walks otherPool first for lounge/coffee/meeting cases so
+    // opportunistic seats aren't poached by home-seekers.
+    this.homePool = seatCells.filter((s) => s.category === "home");
+    this.otherPool = seatCells.filter((s) => s.category !== "home");
     this.deskRects = deskRects;
     this.walkableFn = walkableFn;
     this.callbacks = callbacks;
@@ -174,8 +193,42 @@ export class MovementSystem {
   // Public API — seats
   // ------------------------------------------------------------------
 
+  /** Claim a seat for the given agent. Prefers their stable home desk:
+   *  if they don't have one yet, assign deterministically from `homePool`
+   *  (FNV-1a hash of `id` modulo pool size, with linear probing to skip
+   *  collisions with other agents' homes). On every subsequent call —
+   *  including after a `releaseSeat` — return the same home seat unless
+   *  it's been claimed by another agent in the interim. Falls through
+   *  to any free home seat, then to `otherPool`, only if the home is
+   *  unavailable. */
   claimFreeSeat(id: string): SeatCell | null {
-    for (const seat of this.seatCells) {
+    // Lazy home assignment — first time we see this agent, give them one.
+    let home = this.homeSeatByNpc.get(id);
+    if (!home) {
+      home = this.assignHomeSeat(id);
+      if (home) this.homeSeatByNpc.set(id, home);
+    }
+
+    if (home) {
+      const homeKey = `${home.col},${home.row}`;
+      const occupant = this.occupiedSeats.get(homeKey);
+      if (!occupant || occupant === id) {
+        this.occupiedSeats.set(homeKey, id);
+        this.seatByNpc.set(id, home);
+        return home;
+      }
+    }
+
+    // Home unavailable (or no home pool at all) — fall through to the
+    // first free home seat, then otherPool. Same FIFO behavior as before.
+    for (const seat of this.homePool) {
+      const key = `${seat.col},${seat.row}`;
+      if (this.occupiedSeats.has(key)) continue;
+      this.occupiedSeats.set(key, id);
+      this.seatByNpc.set(id, seat);
+      return seat;
+    }
+    for (const seat of this.otherPool) {
       const key = `${seat.col},${seat.row}`;
       if (this.occupiedSeats.has(key)) continue;
       this.occupiedSeats.set(key, id);
@@ -188,7 +241,11 @@ export class MovementSystem {
   claimFreeSeatInRoom(id: string, room: RoomId): SeatCell | null {
     const region = getRoomRegions().find((r) => r.id === room);
     if (!region) return null;
-    for (const seat of this.seatCells) {
+    // Try `otherPool` first so cinema-idle / lounge breaks claim
+    // CoffeeSeat/LoungeSeat/etc. and never poach a home desk that
+    // happens to fall inside the region.
+    const ordered = [...this.otherPool, ...this.homePool];
+    for (const seat of ordered) {
       if (seat.col < region.colMin || seat.col > region.colMax) continue;
       if (seat.row < region.rowMin || seat.row > region.rowMax) continue;
       const key = `${seat.col},${seat.row}`;
@@ -198,6 +255,33 @@ export class MovementSystem {
       return seat;
     }
     return null;
+  }
+
+  /** Deterministic home-seat picker. FNV-1a hash of the agent id picks
+   *  a starting slot in `homePool`; linear probe skips slots already
+   *  assigned to other agents. Returns null when every home seat is
+   *  permanently spoken for (caller falls back to otherPool / null). */
+  private assignHomeSeat(id: string): SeatCell | undefined {
+    if (this.homePool.length === 0) return undefined;
+    const taken = new Set<string>();
+    for (const seat of this.homeSeatByNpc.values()) {
+      taken.add(`${seat.col},${seat.row}`);
+    }
+    if (taken.size >= this.homePool.length) return undefined;
+
+    // FNV-1a 32-bit
+    let h = 0x811c9dc5;
+    for (let i = 0; i < id.length; i++) {
+      h ^= id.charCodeAt(i);
+      h = Math.imul(h, 0x01000193);
+    }
+    const start = Math.abs(h) % this.homePool.length;
+    for (let i = 0; i < this.homePool.length; i++) {
+      const slot = this.homePool[(start + i) % this.homePool.length];
+      const key = `${slot.col},${slot.row}`;
+      if (!taken.has(key)) return slot;
+    }
+    return undefined;
   }
 
   releaseSeat(id: string): SeatCell | null {
@@ -233,6 +317,7 @@ export class MovementSystem {
   resetSeats(): void {
     this.occupiedSeats.clear();
     this.seatByNpc.clear();
+    this.homeSeatByNpc.clear();
   }
 
   get occupiedCount(): number {
@@ -359,6 +444,7 @@ export class MovementSystem {
     this.active.clear();
     this.occupiedSeats.clear();
     this.seatByNpc.clear();
+    this.homeSeatByNpc.clear();
   }
 
   // ------------------------------------------------------------------
