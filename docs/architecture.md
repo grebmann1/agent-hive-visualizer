@@ -225,3 +225,80 @@ Tiled object naming, multi-provider seam) read
 
 For installing and verifying the hook bridge,
 [`install.md`](install.md).
+
+---
+
+## 7. Game SDK (`src/game/sdk/`)
+
+The monolithic `WorldScene.ts` is being decomposed into composable,
+event-driven systems under `src/game/sdk/`. Each system handles one
+domain and communicates via a typed synchronous event bus.
+
+### Directory layout
+
+```
+src/game/sdk/
+├── event-bus.ts          — Typed pub/sub (SdkEventMap, emit/on/once)
+├── types.ts              — Shared interfaces (ManagedEntity, SystemContext, Direction)
+├── GameSdk.ts            — Orchestrator: creates bus + systems, dispatches tick/destroy
+├── index.ts              — Barrel exports
+└── systems/
+    ├── NpcRegistry.ts    — Entity lifecycle, texture resolution, O(1) lookup
+    ├── MovementSystem.ts — BFS pathfinding, walk tweens, seat mgmt, desk facing
+    ├── ChoreoSystem.ts   — Per-tool animations with 12s auto-decay
+    └── InteractionSystem.ts — Click/drag/zoom, NPC hit-test, dialog trigger
+```
+
+### Usage
+
+```ts
+import { GameSdk } from "./sdk";
+
+// In Phaser scene create():
+this.sdk = new GameSdk(this);
+this.sdk.init({ seatCells, deskRects, walkableFn });
+
+// In update():
+this.sdk.tick(time, delta);
+
+// Move an NPC:
+this.sdk.movement.walkToRoom("agent-123", "lounge");
+
+// Play a choreography:
+this.sdk.choreo.play("agent-123", "write");
+
+// Query:
+this.sdk.registry.get("agent-123");  // ManagedEntity | undefined
+this.sdk.movement.isWalking("agent-123");  // boolean
+```
+
+### Event bus
+
+Systems communicate via typed events — not direct method calls. This
+means new systems can subscribe to existing events without modifying
+the emitter. Key event categories:
+
+| Prefix        | Examples                                      | Emitter            |
+| ------------- | --------------------------------------------- | ------------------ |
+| `npc:`        | `npc:spawned`, `npc:removed`                  | NpcRegistry        |
+| `move:`       | `move:started`, `move:arrived`, `move:cancelled` | MovementSystem  |
+| `choreo:`     | `choreo:started`, `choreo:stopped`            | ChoreoSystem       |
+| `interact:`   | `interact:click`, `interact:hover`, `interact:summon` | InteractionSystem |
+| `store:`      | `store:activity`, `store:npc-added`           | WorldScene bridge  |
+
+### Adding a new system
+
+1. Create `src/game/sdk/systems/MySystem.ts`
+2. Accept `SystemContext` (scene + bus) and `NpcRegistry` in the constructor
+3. Subscribe to relevant bus events
+4. Emit your own events for downstream consumers
+5. Export from `src/game/sdk/index.ts`
+6. Instantiate in `GameSdk.ts` constructor, wire `tick()` if needed
+
+### Migration strategy
+
+The SDK is additive — `WorldScene.ts` still works unchanged. Systems
+are wired incrementally: each `walkNpcToRoom` call in WorldScene can
+be replaced with `this.sdk.movement.walkToRoom(...)` one at a time.
+Once all calls delegate to the SDK, the private methods in WorldScene
+can be deleted.
