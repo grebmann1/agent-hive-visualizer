@@ -171,10 +171,13 @@ interface HelperSprite {
 export class WorldScene extends Phaser.Scene {
   private npcs = new Map<string, Entity>();
 
-  // GameSdk — the single movement/choreo/interaction backend. Assigned
-  // unconditionally in create(); the definite-assignment assertion (`!`)
-  // documents that every method which reads `this.sdk` runs after create().
-  private sdk!: GameSdk;
+  // GameSdk — the single movement/choreo/interaction backend. Built
+  // partway through `create()` (after the async map load), but Phaser
+  // starts pumping `update()` as soon as `create()` is called, so the
+  // first handful of frames see `sdk === undefined`. All read sites
+  // optional-chain (`this.sdk?.…`); methods that need the SDK to exist
+  // are only invoked from event handlers wired up after assignment.
+  private sdk: GameSdk | undefined;
 
   // visualizer store
   private unsubscribeAgents: (() => void) | null = null;
@@ -728,18 +731,23 @@ export class WorldScene extends Phaser.Scene {
     }
   }
 
+  // Façade methods optional-chain through `this.sdk` because Phaser
+  // can pump `update()` (and therefore any caller) before the async
+  // `create()` finishes assigning the SDK. Pre-init falls through to
+  // sensible no-op defaults — the same pattern the legacy director used.
+
   private claimFreeSeat(npcId: string): SeatCell | null {
-    return this.sdk.movement.claimFreeSeat(npcId);
+    return this.sdk?.movement.claimFreeSeat(npcId) ?? null;
   }
 
   private claimFreeSeatInRoom(npcId: string, room: RoomId): SeatCell | null {
-    return this.sdk.movement.claimFreeSeatInRoom(npcId, room);
+    return this.sdk?.movement.claimFreeSeatInRoom(npcId, room) ?? null;
   }
 
   private releaseSeat(npcId: string) {
     // MovementSystem.releaseSeat handles the seat → run texture swap on
     // its end, so this is a thin pass-through.
-    this.sdk.movement.releaseSeat(npcId);
+    this.sdk?.movement.releaseSeat(npcId);
   }
 
   // --------------------------------------------------------------------
@@ -750,35 +758,35 @@ export class WorldScene extends Phaser.Scene {
   // --------------------------------------------------------------------
 
   private mvHasPlan(npcId: string): boolean {
-    return this.sdk.movement.hasPlan(npcId);
+    return this.sdk?.movement.hasPlan(npcId) ?? false;
   }
 
   private mvIsSeated(npcId: string): boolean {
-    return this.sdk.movement.isSeated(npcId);
+    return this.sdk?.movement.isSeated(npcId) ?? false;
   }
 
   private mvGetSeat(npcId: string): SeatCell | undefined {
-    return this.sdk.movement.getSeat(npcId);
+    return this.sdk?.movement.getSeat(npcId);
   }
 
   private mvCancelMovement(npcId: string): void {
-    this.sdk.movement.cancelPath(npcId);
+    this.sdk?.movement.cancelPath(npcId);
   }
 
   private mvDeskFacingFor(col: number, row: number): Direction {
-    return this.sdk.movement.deskFacingFor(col, row);
+    return this.sdk?.movement.deskFacingFor(col, row) ?? "down";
   }
 
   private mvOccupiedCount(): number {
-    return this.sdk.movement.occupiedCount;
+    return this.sdk?.movement.occupiedCount ?? 0;
   }
 
   private mvTotalSeats(): number {
-    return this.sdk.movement.totalSeats;
+    return this.sdk?.movement.totalSeats ?? 0;
   }
 
   private mvAllSeatCells(): readonly SeatCell[] {
-    return this.sdk.movement.allSeatCells;
+    return this.sdk?.movement.allSeatCells ?? [];
   }
 
   /**
@@ -848,7 +856,7 @@ export class WorldScene extends Phaser.Scene {
   ) {
     const npc = this.npcs.get(npcId);
     if (!npc) return;
-    this.sdk.movement.walkToCell(npcId, targetCol, targetRow, finalOffset);
+    this.sdk?.movement.walkToCell(npcId, targetCol, targetRow, finalOffset);
   }
 
   // --------------------------------------------------------------------
@@ -1162,7 +1170,7 @@ export class WorldScene extends Phaser.Scene {
     // `this.npcs` so MovementSystem / ChoreoSystem / InteractionSystem
     // can read and write the same Phaser objects.
     const entity = this.npcs.get(def.id);
-    if (entity) this.sdk.registry.attach(def.id, entity);
+    if (entity) this.sdk?.registry.attach(def.id, entity);
 
     // Paint the initial pill (resting state, idle emoji). We do this once
     // the entry is in the map so renderPill can reach it by id.
@@ -1366,7 +1374,7 @@ export class WorldScene extends Phaser.Scene {
     // and cancels any active path + releases the seat. Pair this with
     // attach() rather than remove() because WorldScene already owns the
     // sprite/shadow lifetimes.
-    this.sdk.registry.detach(id);
+    this.sdk?.registry.detach(id);
     // World-life v2: drop the FSM entry so a later re-spawn starts
     // clean. No-op when the flag is off (worldLifeDebug is empty).
     worldLifeDebug.forget(id);
@@ -1643,7 +1651,7 @@ export class WorldScene extends Phaser.Scene {
   // per-frame
   // --------------------------------------------------------------------
   update(time: number, delta: number) {
-    this.sdk.tick(time, delta);
+    this.sdk?.tick(time, delta);
     this.tickChoreoDecay();
     this.tickFollowCamera();
     this.tickSpriteSeparation();
@@ -1999,7 +2007,7 @@ export class WorldScene extends Phaser.Scene {
   walkNpcToRoom(npcId: string, room: RoomId) {
     const npc = this.npcs.get(npcId);
     if (!npc) return;
-    this.sdk.movement.walkToRoom(npcId, room);
+    this.sdk?.movement.walkToRoom(npcId, room);
   }
 
   private isEntityAt(col: number, row: number, exceptNpcId?: string): boolean {
