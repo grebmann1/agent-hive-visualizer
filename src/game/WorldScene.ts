@@ -2007,6 +2007,26 @@ export class WorldScene extends Phaser.Scene {
   walkNpcToRoom(npcId: string, room: RoomId) {
     const npc = this.npcs.get(npcId);
     if (!npc) return;
+    // RoomId "desk" is the catch-all for ~12 of 15 agent states (idle,
+    // thinking, coding, debugging, calling_tool, …). Routing every
+    // desk-bound agent to ROOM_ANCHORS.desk would funnel them all to
+    // the single tile mapped from the .tmj `DataCenter` rect — they'd
+    // pile up there and never reach their home desks until the cinema
+    // idle loop fired ~60s later. Short-circuit straight to the home
+    // seat so each agent reads as "back at their own workstation."
+    if (room === "desk") {
+      const seat = this.claimFreeSeat(npcId);
+      if (seat) {
+        this.walkNpcToCell(npcId, seat.col, seat.row, {
+          px: seat.px,
+          py: seat.py,
+          orientation: seat.orientation,
+        });
+        return;
+      }
+      // No home seat available (pool exhausted) — fall through to the
+      // DataCenter anchor as a last resort so they at least move.
+    }
     this.sdk?.movement.walkToRoom(npcId, room);
   }
 
