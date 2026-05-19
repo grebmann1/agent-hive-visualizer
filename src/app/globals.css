@@ -199,12 +199,11 @@ canvas,
   background-position: 0 0, 2px 2px;
 }
 
-/* Top title bar — flat dark to match the rest of the dark UI. */
+/* Top title bar */
 .title-strip {
   background: var(--paper-dim);
   color: var(--ink);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-  box-shadow: inset 0 -1px 0 rgba(255, 255, 255, 0.04);
+  border-bottom: 2px solid var(--border);
 }
 
 @keyframes fadeIn {

@@ -5,9 +5,12 @@ import { useActivityModalStore } from "../stores/useActivityModalStore";
 import { useAgentStore } from "../stores/useAgentStore";
 import { useNpcStore } from "../stores/useNpcStore";
 import type { DynamicNpc } from "../stores/useNpcStore";
+import { useSettingsStore } from "../stores/useSettingsStore";
 import { useTerminalStore } from "../stores/useTerminalStore";
+import { useToastStore } from "../stores/useToastStore";
 import { npcById } from "../game/npcs";
 import { buildToolMessage, shortPath } from "./tool-format";
+import { downloadTrace } from "./exportTrace";
 import { formatState, formatTool } from "../events/stateToRoom";
 import type { AgentState } from "../events/types";
 
@@ -99,6 +102,34 @@ export default function ActivityModal() {
 
   const usage = npcId ? usageByAgent[npcId] : undefined;
   const session = npcId ? sessionByAgent[npcId] : undefined;
+  const exportIncludePrompts = useSettingsStore(
+    (s) => s.exportIncludePrompts,
+  );
+  const setExportIncludePrompts = useSettingsStore(
+    (s) => s.setExportIncludePrompts,
+  );
+
+  const onExportTrace = () => {
+    if (!npcId) return;
+    const dyn = dynamics[npcId];
+    downloadTrace({
+      agentId: npcId,
+      displayName: npc?.name ?? npcId,
+      events: agentEvents,
+      npc: dyn ?? null,
+      session: session ?? null,
+      usage: usage ?? null,
+      includePrompts: exportIncludePrompts,
+    });
+    useToastStore
+      .getState()
+      .show(
+        exportIncludePrompts
+          ? "Trace saved (with prompt text)."
+          : "Trace saved.",
+        "info",
+      );
+  };
 
   useEffect(() => {
     if (!open) return;
@@ -422,6 +453,36 @@ export default function ActivityModal() {
             })}
           </ul>
         )}
+
+        <div className="mt-3 pt-2 border-t-2 border-ink flex items-center justify-between gap-3">
+          <label
+            className="flex items-center gap-1.5 cursor-pointer select-none"
+            title="Include user-prompt and tool input/output text in the export."
+          >
+            <input
+              type="checkbox"
+              checked={exportIncludePrompts}
+              onChange={(e) => setExportIncludePrompts(e.target.checked)}
+              className="cursor-pointer"
+            />
+            <span className="pixel-font text-[9px] text-ink-soft tracking-wide">
+              INCLUDE PROMPTS
+            </span>
+          </label>
+          <button
+            type="button"
+            onClick={onExportTrace}
+            disabled={agentEvents.length === 0}
+            className="pixel-font text-[10px] px-3 py-1.5 rounded border-2 border-ink bg-paper hover:bg-paper-dim disabled:opacity-40 disabled:cursor-not-allowed tracking-wide"
+            title={
+              agentEvents.length === 0
+                ? "No events to export yet"
+                : "Save the in-memory event buffer for this agent as JSONL"
+            }
+          >
+            EXPORT TRACE
+          </button>
+        </div>
       </div>
     </div>
   );

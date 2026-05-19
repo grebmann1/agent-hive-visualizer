@@ -1,7 +1,14 @@
 "use client";
 
-import { type MouseEvent as ReactMouseEvent } from "react";
+import {
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import NpcAvatar from "./NpcAvatar";
+import { useAgentPrefsStore } from "../stores/useAgentPrefsStore";
 import { useAgentStore } from "../stores/useAgentStore";
 import { useGameStore } from "../stores/useGameStore";
 import { useContextMenuStore } from "../stores/useContextMenuStore";
@@ -11,6 +18,13 @@ import { useToastStore } from "../stores/useToastStore";
 import { useWorldBus } from "../stores/useWorldBus";
 import type { NpcDef } from "../game/npcs";
 import type { AgentProviderId, DynamicNpc } from "../stores/useNpcStore";
+
+function basename(p: string | undefined): string | undefined {
+  if (!p) return undefined;
+  const trimmed = p.replace(/[\\/]+$/, "");
+  const slash = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
+  return slash === -1 ? trimmed : trimmed.slice(slash + 1);
+}
 
 // Per-provider chip styling. Looked up by `provider` first; the
 // "external" branch is a legacy fallback for NPCs upserted before the
@@ -54,6 +68,7 @@ export default function AgentRoster() {
   const errorByAgent = useAgentStore((s) => s.errorByAgent);
   const staticNpcs = useNpcStore((s) => s.staticNpcs);
   const dynamic = useNpcStore((s) => s.dynamic);
+  const prefs = useAgentPrefsStore((s) => s.prefs);
 
   // Put static NPCs first (when there are any — currently the roster is
   // live-only so this just sorts dynamic NPCs). Sub-agents (NPCs with a
@@ -63,6 +78,19 @@ export default function AgentRoster() {
   const dynamicParents = dynamicList.filter(
     (n) => !("parentId" in n) || !n.parentId,
   );
+  // Pinned parents first, then unpinned, preserving insertion order
+  // within each bucket. Pin state is keyed by cwd|pid so it survives
+  // a session restart (live `id` changes; the project doesn't).
+  const isPinned = (n: DynamicNpc): boolean => {
+    if (!n.cwd) return false;
+    const key = n.pid ? `${n.cwd}|${n.pid}` : n.cwd;
+    return !!prefs[key]?.pinned;
+  };
+  dynamicParents.sort((a, b) => {
+    const ap = isPinned(a) ? 1 : 0;
+    const bp = isPinned(b) ? 1 : 0;
+    return bp - ap;
+  });
   const dynamicChildrenByParent = new Map<string, typeof dynamicList>();
   for (const n of dynamicList) {
     const p = (n as { parentId?: string }).parentId;
@@ -120,15 +148,20 @@ export default function AgentRoster() {
             Click an agent to chat. Right-click for activity.
           </p>
           <ul className="space-y-2 overflow-y-auto overflow-x-hidden pixel-scroll flex-1 pr-1 min-h-0">
-            {[...staticList, ...dynamicParents].map((n) =>
-              renderRow(n, false, {
-                activities,
-                usageByAgent,
-                errorByAgent,
-                dialogNpcId,
-                dynamicChildrenByParent,
-              }),
-            )}
+            {[...staticList, ...dynamicParents].map((n) => (
+              <AgentRow
+                key={n.id}
+                n={n}
+                isChild={false}
+                opts={{
+                  activities,
+                  usageByAgent,
+                  errorByAgent,
+                  dialogNpcId,
+                  dynamicChildrenByParent,
+                }}
+              />
+            ))}
           </ul>
         </>
       )}
@@ -149,16 +182,16 @@ interface RenderRowOpts {
   dynamicChildrenByParent: Map<string, DynamicNpc[]>;
 }
 
-function renderRow(
-  n: NpcDef | DynamicNpc,
-  isChild: boolean,
-  opts: RenderRowOpts,
-) {
+function AgentRow({
+  n,
+  isChild,
+  opts,
+}: {
+  n: NpcDef | DynamicNpc;
+  isChild: boolean;
+  opts: RenderRowOpts;
+}) {
   const { activities, usageByAgent, errorByAgent, dialogNpcId, dynamicChildrenByParent } = opts;
-  // Look up this row's children from the global map so grandchildren
-  // (sub-agent of sub-agent) render too. The top-level call also goes
-  // through this path so we don't need separate hasChildren/children
-  // props on opts.
   const children = dynamicChildrenByParent?.get(n.id);
   const hasChildren = !!children && children.length > 0;
   const act = activities[n.id];
@@ -167,15 +200,65 @@ function renderRow(
   const isDynamic = "dynamic" in n;
   const isExternal = isDynamic && (n as DynamicNpc).external === true;
   const avatarSize = isChild ? 24 : 40;
+  const dyn = isDynamic ? (n as DynamicNpc) : null;
+
+  // Stable per-project key for prefs (rename + pin). Falls back to
+  // null for in-memory-only NPCs (no cwd) — those can't persist
+  // their rename across reload, but the rename still works for the
+  // current session.
+  const prefKey = useAgentPrefsStore((s) => s.keyFor(dyn?.cwd, dyn?.pid));
+  const pref = useAgentPrefsStore((s) =>
+    prefKey ? s.prefs[prefKey] : undefined,
+  );
+  const setName = useAgentPrefsStore((s) => s.setName);
+  const setPinned = useAgentPrefsStore((s) => s.setPinned);
+
+  // Display name precedence: user-chosen > path.basename(cwd) for
+  // anonymous Claude-XXXX defaults > the live agent name.
+  const isAnonymousDefault =
+    isDynamic && /^Claude-[a-z0-9]+$/i.test(String(n.name));
+  const baseFallback = isAnonymousDefault ? basename(dyn?.cwd) : undefined;
+  const displayName = pref?.name ?? baseFallback ?? n.name;
+  const pinned = !!pref?.pinned;
+
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  useEffect(() => {
+    if (editing && inputRef.current) {
+      inputRef.current.focus();
+      inputRef.current.select();
+    }
+  }, [editing]);
+
+  const beginEdit = () => {
+    if (!prefKey) return;
+    setDraft(pref?.name ?? displayName);
+    setEditing(true);
+  };
+  const commitEdit = () => {
+    if (prefKey) setName(prefKey, draft);
+    setEditing(false);
+  };
+  const cancelEdit = () => setEditing(false);
+  const onEditKey = (e: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      commitEdit();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      cancelEdit();
+    }
+  };
   // Sub-agents render nested under their parent — bigger left padding
   // plus a thin accent border so the relationship is unmistakable.
   const indent = isChild ? "pl-8 border-l-2 border-accent/40 ml-3" : "";
 
   const handleClick = () => {
+    if (editing) return;
     // Always summon in-world.
     useWorldBus.getState().summonAgent(n.id);
 
-    const dyn = isDynamic ? (n as DynamicNpc) : null;
     const terminalId = dyn?.terminalId;
     if (terminalId) {
       // Terminal-linked: focus our own embedded tab.
@@ -229,14 +312,56 @@ function renderRow(
       </div>
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2 gap-y-1 flex-wrap mb-1">
-          <span
-            className="pixel-font truncate"
-            style={{ fontSize: isChild ? 11 : 12 }}
-          >
-            {n.name.toUpperCase()}
-          </span>
+          {editing ? (
+            <input
+              ref={inputRef}
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={onEditKey}
+              onBlur={commitEdit}
+              onClick={(e) => e.stopPropagation()}
+              className="pixel-font bg-paper-dim border border-ink rounded px-1 py-0.5 outline-none"
+              style={{ fontSize: isChild ? 11 : 12, maxWidth: 180 }}
+              maxLength={40}
+              aria-label="Rename agent"
+            />
+          ) : (
+            <span
+              className="pixel-font truncate"
+              style={{ fontSize: isChild ? 11 : 12 }}
+              onDoubleClick={(e) => {
+                e.stopPropagation();
+                beginEdit();
+              }}
+              title={
+                prefKey
+                  ? "Double-click to rename"
+                  : "Rename available once the agent reports its working directory"
+              }
+            >
+              {displayName.toUpperCase()}
+            </span>
+          )}
+          {prefKey && !isChild && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setPinned(prefKey, !pinned);
+              }}
+              className="pixel-font text-[10px] px-1 py-0.5 rounded"
+              style={{
+                background: pinned ? "#c9a959" : "transparent",
+                color: pinned ? "#1b1e2b" : "var(--ink-soft, #888)",
+                border: "1px solid " + (pinned ? "#1b1e2b" : "transparent"),
+              }}
+              title={pinned ? "Unpin from top" : "Pin to top"}
+              aria-pressed={pinned}
+            >
+              {pinned ? "★" : "☆"}
+            </button>
+          )}
           {(() => {
-            const dyn = isDynamic ? (n as DynamicNpc) : null;
             const chip = pickProviderChip(isDynamic, dyn?.provider, isExternal);
             if (!chip) return null;
             return (
@@ -305,7 +430,9 @@ function renderRow(
         )}
         {children && children.length > 0 && (
           <ul className="mt-2 space-y-1">
-            {children.map((child) => renderRow(child, true, opts))}
+            {children.map((child) => (
+              <AgentRow key={child.id} n={child} isChild opts={opts} />
+            ))}
           </ul>
         )}
       </div>

@@ -7,12 +7,16 @@ contextBridge.exposeInMainWorld("agentquest", {
   platform: process.platform,
 
   // Real-time claude lifecycle events forwarded from the local hook HTTP
-  // server (see electron/hook-server.js). Each payload is a raw Claude
-  // Code hook JSON — shape varies by hook_event_name.
+  // server (see electron/hook-server.js). Each entry is `{ seq, payload }`
+  // where `payload` is a raw Claude Code hook JSON. Subscribers should
+  // remember the highest `seq` they've processed and pass it to
+  // `hooks.replay({ sinceSeq })` on (re-)attach so that hooks fired
+  // before the renderer mounted (or during a React strict-mode unmount)
+  // are not lost. The provider layer dedupes by seq.
   subscribeHookEvents: (cb) => {
-    const listener = (_event, payload) => {
+    const listener = (_event, entry) => {
       try {
-        cb(payload);
+        cb(entry);
       } catch (err) {
         console.error("[agentquest] hook subscriber threw", err);
       }
@@ -27,6 +31,9 @@ contextBridge.exposeInMainWorld("agentquest", {
     uninstall: () => ipcRenderer.invoke("hooks:uninstall"),
     isInstalled: () => ipcRenderer.invoke("hooks:isInstalled"),
     openSettings: () => ipcRenderer.invoke("hooks:openSettings"),
+    replay: (sinceSeq) => ipcRenderer.invoke("hooks:replay", { sinceSeq }),
+    status: () => ipcRenderer.invoke("hooks:status"),
+    rebind: () => ipcRenderer.invoke("hooks:rebind"),
   },
   askClaude: ({ cwd, prompt }, onEvent) => {
     const requestId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;

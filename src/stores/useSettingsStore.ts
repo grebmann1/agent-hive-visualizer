@@ -20,16 +20,43 @@ interface SettingsState {
    *  chit-chat bubbles, decorative parallax, particle FX. Keeps: agent
    *  presence, status icons, task progress, error states, dialogs. */
   calmMode: boolean;
+  /** When true, "EXPORT TRACE" includes user-prompt and tool-input/result
+   *  text in the JSONL. Off by default — even with everything kept in
+   *  memory only, downloading prompts to disk crosses a privacy line we
+   *  want to flag explicitly. */
+  exportIncludePrompts: boolean;
 
   setWorldLifeV2: (v: boolean) => void;
   toggleWorldLifeV2: () => boolean;
   setCalmMode: (v: boolean) => void;
   toggleCalmMode: () => boolean;
+  setExportIncludePrompts: (v: boolean) => void;
+}
+
+const EXPORT_PROMPTS_KEY = "agentquest:exportIncludePrompts";
+
+function loadExportIncludePrompts(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    return window.localStorage.getItem(EXPORT_PROMPTS_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function persistExportIncludePrompts(v: boolean): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(EXPORT_PROMPTS_KEY, v ? "1" : "0");
+  } catch {
+    // ignore
+  }
 }
 
 export const useSettingsStore = create<SettingsState>()((set, get) => ({
   worldLifeV2: false,
   calmMode: false,
+  exportIncludePrompts: loadExportIncludePrompts(),
 
   setWorldLifeV2: (v) => set({ worldLifeV2: v }),
   toggleWorldLifeV2: () => {
@@ -42,6 +69,10 @@ export const useSettingsStore = create<SettingsState>()((set, get) => ({
     const next = !get().calmMode;
     set({ calmMode: next });
     return next;
+  },
+  setExportIncludePrompts: (v) => {
+    persistExportIncludePrompts(v);
+    set({ exportIncludePrompts: v });
   },
 }));
 

@@ -18,8 +18,8 @@ Pick where to start:
 - **[How it works](architecture.md)** — the full pipeline from a
   Claude hook to a sprite walking on the map. Render layers, visual
   vocabulary (pill emojis, badges, tethers, time-of-day tint), the
-  sub-agent linker, and a "where to look when something doesn't
-  move" cheat sheet.
+  sub-agent linker, the Game SDK system architecture, and a "where
+  to look when something doesn't move" cheat sheet.
 - **[Hooks → Rooms reference](hooks-and-rooms.md)** — the full
   hook → state → room mapping table, Tiled object naming reference,
   planned rooms, multi-provider seam.

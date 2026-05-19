@@ -108,14 +108,24 @@ function createAPI(provider: AgentProvider): AgentProviderAPI {
         store.addDynamic({ ...existing, pid: realPid });
       }
       // Idempotent: refresh the mutable fields if the identity changed.
+      // parentId/subagentType can land late (orphan-child claim path
+      // in HookProvider): when a parent's Task PreToolUse arrives
+      // after the child's first hook, we re-upsert with the parent
+      // link so the roster/world reveal the hierarchy retroactively.
+      const nextParentId = parentId ?? existing.parentId;
+      const nextSubagentType = subagentType ?? existing.subagentType;
       if (
         existing.name !== agent.displayName ||
-        existing.cwd !== agent.cwd
+        existing.cwd !== agent.cwd ||
+        existing.parentId !== nextParentId ||
+        existing.subagentType !== nextSubagentType
       ) {
         store.addDynamic({
           ...existing,
           name: agent.displayName,
           cwd: agent.cwd,
+          parentId: nextParentId,
+          subagentType: nextSubagentType,
         });
       }
     },

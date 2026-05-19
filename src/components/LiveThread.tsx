@@ -13,10 +13,54 @@
 // classic "chat log" feel. The store already caps the log at 100 entries
 // per agent, so we don't trim aggressively here.
 
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useAgentStore } from "../stores/useAgentStore";
 import { buildToolMessage } from "./tool-format";
 import type { AgentEvent } from "../events/types";
+
+// A run of N consecutive tool-call events for the same tool, collapsed
+// into one row that can expand inline. Plain events are wrapped in a
+// `single` form to keep the render loop uniform.
+type ThreadItem =
+  | { kind: "single"; event: AgentEvent; key: string }
+  | {
+      kind: "group";
+      toolName: string;
+      events: AgentEvent[];
+      key: string;
+    };
+
+function groupConsecutiveToolCalls(events: AgentEvent[]): ThreadItem[] {
+  const items: ThreadItem[] = [];
+  for (let i = 0; i < events.length; i++) {
+    const e = events[i];
+    const meta = (e.metadata ?? {}) as { toolName?: string };
+    const isToolCall =
+      e.type === "agent.state.changed" && typeof meta.toolName === "string";
+    if (!isToolCall) {
+      items.push({ kind: "single", event: e, key: `${e.timestamp}-${i}` });
+      continue;
+    }
+    const toolName = meta.toolName as string;
+    // Extend the previous group if it's the same tool back-to-back.
+    const last = items[items.length - 1];
+    if (
+      last &&
+      last.kind === "group" &&
+      last.toolName === toolName
+    ) {
+      last.events.push(e);
+      continue;
+    }
+    items.push({
+      kind: "group",
+      toolName,
+      events: [e],
+      key: `${e.timestamp}-${i}`,
+    });
+  }
+  return items;
+}
 
 interface LiveThreadProps {
   agentId: string;
@@ -53,6 +97,7 @@ export default function LiveThread({
   }, [events.length]);
 
   const visible = events.slice(-MAX_EVENTS);
+  const items = useMemo(() => groupConsecutiveToolCalls(visible), [visible]);
 
   return (
     <div className="min-h-[220px] max-h-[46vh] flex flex-col">
@@ -61,18 +106,32 @@ export default function LiveThread({
         onScroll={onScroll}
         className="pixel-scroll flex-1 overflow-y-auto pr-1 space-y-1.5"
       >
-        {visible.length === 0 ? (
+        {items.length === 0 ? (
           <div className="py-6 text-center italic text-ink-soft text-[13px]">
             Waiting for the agent&apos;s first action…
           </div>
         ) : (
-          visible.map((e, i) => (
-            <EventRow
-              key={`${e.timestamp}-${i}`}
-              event={e}
-              agentName={agentName}
-            />
-          ))
+          items.map((item) =>
+            item.kind === "single" ? (
+              <EventRow
+                key={item.key}
+                event={item.event}
+                agentName={agentName}
+              />
+            ) : item.events.length === 1 ? (
+              <EventRow
+                key={item.key}
+                event={item.events[0]}
+                agentName={agentName}
+              />
+            ) : (
+              <ToolGroupRow
+                key={item.key}
+                toolName={item.toolName}
+                events={item.events}
+              />
+            ),
+          )
         )}
       </div>
       {onSessionDead && (
@@ -190,6 +249,54 @@ function EventRow({
   return (
     <div className="text-[12px] text-ink-soft leading-snug">
       {event.message}
+    </div>
+  );
+}
+
+function ToolGroupRow({
+  toolName,
+  events,
+}: {
+  toolName: string;
+  events: AgentEvent[];
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const last = events[events.length - 1];
+  const lastSummary = buildToolMessage(toolName, last.metadata);
+  return (
+    <div className="text-[12px] leading-snug">
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        className="flex items-baseline gap-1.5 text-left w-full hover:text-ink"
+      >
+        <span className="text-ink-soft">⚙</span>
+        <span className="font-mono text-ink">{toolName}</span>
+        <span
+          className="pixel-font text-[10px] tracking-wide text-accent"
+          aria-label={`${events.length} calls`}
+        >
+          ×{events.length}
+        </span>
+        <span className="font-mono text-ink-soft truncate">
+          — last: {lastSummary}
+        </span>
+        <span className="ml-auto text-ink-soft text-[10px] pixel-font">
+          {expanded ? "▴" : "▾"}
+        </span>
+      </button>
+      {expanded && (
+        <div className="mt-1 ml-4 space-y-0.5 border-l-2 border-ink-soft/30 pl-2">
+          {events.map((e, i) => (
+            <div
+              key={`${e.timestamp}-${i}`}
+              className="text-[11px] text-ink-soft leading-snug font-mono"
+            >
+              {buildToolMessage(toolName, e.metadata)}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

@@ -16,7 +16,6 @@
 // path, so we idle-timeout agents after ~10 min of silence.
 
 import type { AgentEvent } from "../events/types";
-import { useNpcStore } from "../stores/useNpcStore";
 import type {
   AgentProvider,
   AgentProviderAPI,
@@ -56,10 +55,18 @@ interface AgentQuestTerminalBridge {
   ) => () => void;
 }
 
+// Hook events arrive wrapped in `{ seq, payload }` so the renderer can
+// dedupe across replay (cold launch / React strict-mode unmount) and
+// live delivery. See electron/main.js `pushHookEvent` for the producer.
+export interface HookEnvelope {
+  seq: number;
+  payload: HookPayload;
+}
+
 interface AgentQuestBridge {
   isElectron: boolean;
   platform: string;
-  subscribeHookEvents: (cb: (payload: HookPayload) => void) => () => void;
+  subscribeHookEvents: (cb: (entry: HookEnvelope) => void) => () => void;
   askClaude?: (
     args: { cwd: string; prompt: string },
     onEvent: (event: {
@@ -92,6 +99,18 @@ interface AgentQuestBridge {
     uninstall: () => Promise<{ ok?: boolean; error?: string }>;
     isInstalled: () => Promise<{ installed: boolean; error?: string }>;
     openSettings: () => Promise<{ ok?: boolean; error?: string }>;
+    replay: (sinceSeq: number) => Promise<{
+      entries: HookEnvelope[];
+      latestSeq: number;
+    }>;
+    status: () => Promise<{
+      installed: boolean;
+      port: number | null;
+      bound: boolean;
+      bindError: string | null;
+      lastEventAt: number | null;
+    }>;
+    rebind: () => Promise<{ ok: boolean; port?: number; error?: string | null }>;
   };
 }
 
@@ -127,6 +146,12 @@ interface AgentPresence {
   terminalId?: string;
   external: boolean;
   lastSeen: number;
+  // Recorded the first time a Task PreToolUse from a known parent is
+  // matched to this brand-new session. We keep it on the provider so
+  // `SubagentStop` can resolve the parent without reaching into
+  // `useNpcStore` — important when the parent's NPC was already
+  // idle-swept by the time the helper finishes.
+  parentId?: string;
 }
 
 const IDLE_TIMEOUT_MS = 10 * 60 * 1000;
@@ -136,6 +161,19 @@ const PRESENCE_SWEEP_MS = 30 * 1000;
 // hooks don't carry an explicit parent_session_id, so we infer the
 // link by timing.
 const TASK_SPAWN_WINDOW_MS = 60 * 1000;
+// Reverse window: a brand-new child session whose first hook lands
+// before the parent's `Task` PreToolUse (the wrapper script fires
+// hooks via two backgrounded curl processes, so ordering isn't
+// guaranteed) is held in `orphanChildren` for this long. If a parent
+// Task arrives within the window, we retroactively patch the
+// parentId via a second upsertAgent. Otherwise the child stands on
+// its own as a top-level agent.
+//
+// Kept short on purpose: the curl race is local + sub-100ms, so a
+// few hundred ms is plenty. A larger window risks adopting a
+// concurrent user-launched top-level session as a fake sub-agent
+// just because someone else fired Task at roughly the same instant.
+const ORPHAN_CHILD_WINDOW_MS = 500;
 
 function agentIdFor(payload: HookPayload): string | null {
   if (payload.agentquest_terminal_id) {
@@ -257,6 +295,17 @@ export class HookProvider implements AgentProvider {
     string,
     Array<{ at: number; subagentType?: string }>
   >();
+  // Highest hook envelope seq we have already processed. Both live
+  // delivery and the initial `hooks.replay()` flush feed `handle()`
+  // through `processEnvelope`, which drops anything ≤ this value so
+  // duplicate replay (e.g. across a React strict-mode mount/unmount/
+  // mount cycle in dev) doesn't double-up events.
+  private lastProcessedSeq = 0;
+  // Brand-new child sessions whose first hook arrived before any
+  // parent Task PreToolUse we know about. Held for
+  // ORPHAN_CHILD_WINDOW_MS so a late-arriving parent Task can claim
+  // them. Keyed by agentId. See ORPHAN_CHILD_WINDOW_MS comment.
+  private orphanChildren = new Map<string, { at: number }>();
 
   start(api: AgentProviderAPI): () => void {
     this.apiRef = api;
@@ -267,9 +316,24 @@ export class HookProvider implements AgentProvider {
       // Outside Electron (SSR / browser preview). No-op.
       return () => {};
     }
-    const unsubscribe = subscribe((payload: HookPayload) =>
-      this.handle(payload, api),
+    const unsubscribe = subscribe((entry: HookEnvelope) =>
+      this.processEnvelope(entry, api),
     );
+    // Drain anything the main-process buffered before this subscription
+    // attached. Safe to run unconditionally: processEnvelope dedupes by
+    // seq, so a no-op on subsequent mounts.
+    if (bridge?.hooks?.replay) {
+      bridge.hooks
+        .replay(this.lastProcessedSeq)
+        .then(({ entries }) => {
+          for (const entry of entries) {
+            this.processEnvelope(entry, api);
+          }
+        })
+        .catch((err) => {
+          console.warn("[hook-provider] replay failed:", err);
+        });
+    }
     this.sweepTimer = setInterval(
       () => this.sweepIdle(api),
       PRESENCE_SWEEP_MS,
@@ -332,6 +396,17 @@ export class HookProvider implements AgentProvider {
     };
   }
 
+  private processEnvelope(entry: HookEnvelope, api: AgentProviderAPI): void {
+    // Guard against duplicate delivery (live + replay overlap, or a
+    // second strict-mode mount replaying from seq 0 before live picks
+    // up where the previous mount left off).
+    if (typeof entry?.seq !== "number" || entry.seq <= this.lastProcessedSeq) {
+      return;
+    }
+    this.lastProcessedSeq = entry.seq;
+    this.handle(entry.payload, api);
+  }
+
   private handle(payload: HookPayload, api: AgentProviderAPI): void {
     const agentId = agentIdFor(payload);
     if (!agentId) return;
@@ -347,15 +422,26 @@ export class HookProvider implements AgentProvider {
       terminalId: payload.agentquest_terminal_id ?? existing?.terminalId,
       external,
       lastSeen: now,
+      parentId: existing?.parentId,
     };
     this.presence.set(agentId, presence);
     if (!existing) {
       // Best-effort parent inference: if a known agent fired a `Task`
       // PreToolUse in the last TASK_SPAWN_WINDOW_MS, the brand-new
       // session showing up now is almost certainly the spawned helper.
-      // consumeRecentTaskParent() pops one queued entry from the
-      // chosen parent so parallel Tasks each get their own child.
+      // consumeRecentTaskParent() pops the OLDEST queued entry across
+      // all parents so causality is preserved when multiple parents
+      // each fire parallel Tasks.
       const link = this.consumeRecentTaskParent(now);
+      if (link) {
+        presence.parentId = link.parentId;
+      } else {
+        // Hook ordering between parent.PreToolUse(Task) and child's
+        // SessionStart isn't guaranteed (two backgrounded curls). If
+        // no parent claim is in flight, hold this child briefly so a
+        // late-arriving Task can patch the link retroactively.
+        this.orphanChildren.set(agentId, { at: now });
+      }
       api.upsertAgent({
         id: agentId,
         displayName: prettyName(agentId, presence.sessionId),
@@ -427,9 +513,20 @@ export class HookProvider implements AgentProvider {
         // the `subagent_type` so the renderer can label the helper.
         if (payload.tool_name === "Task") {
           const subagentType = pickString(payload.tool_input, "subagent_type");
-          const queue = this.recentTaskByParent.get(agentId) ?? [];
-          queue.push({ at: now, subagentType });
-          this.recentTaskByParent.set(agentId, queue);
+          // First try to claim a still-fresh orphan child whose first
+          // hook landed before this Task. If we find one, patch its
+          // parentId via a second upsertAgent — no queue entry needed.
+          const claimed = this.claimOrphanChild(
+            now,
+            agentId,
+            subagentType,
+            api,
+          );
+          if (!claimed) {
+            const queue = this.recentTaskByParent.get(agentId) ?? [];
+            queue.push({ at: now, subagentType });
+            this.recentTaskByParent.set(agentId, queue);
+          }
         }
         const state = toolToState(payload.tool_name);
         const file =
@@ -500,10 +597,10 @@ export class HookProvider implements AgentProvider {
         // delegated work. Surface a "subagent completed" event on the
         // PARENT's stream so the activity modal shows the handoff,
         // then remove the sub-agent's NPC. The parent's own session
-        // keeps running.
-        const child = useNpcStore.getState().dynamic[agentId];
-        const parentNpcId = (child as { parentId?: string } | undefined)
-          ?.parentId;
+        // keeps running. Read the parent link from our own presence
+        // map so an idle-swept parent's NPC (no longer in
+        // useNpcStore) still produces a completion event.
+        const parentNpcId = presence.parentId;
         if (parentNpcId) {
           const summary =
             typeof payload.prompt === "string" && payload.prompt.length > 0
@@ -552,23 +649,33 @@ export class HookProvider implements AgentProvider {
         this.recentTaskByParent.set(parentId, fresh);
       }
     }
+    // Drop orphan children whose parent Task never arrived.
+    for (const [childId, info] of this.orphanChildren) {
+      if (now - info.at > ORPHAN_CHILD_WINDOW_MS) {
+        this.orphanChildren.delete(childId);
+      }
+    }
   }
 
-  /** Pop one queued `Task` PreToolUse entry from the parent that most
-   *  likely just spawned this brand-new session. Skips parents that
-   *  have already left the world (their session ended before the
-   *  helper hook arrived) so we don't draw a tether to nobody. */
+  /** Pop the OLDEST queued `Task` PreToolUse entry across all parents.
+   *  Causality is FIFO: the first Task that fired in the spawn window
+   *  matches the first new session that lands. Picking the most-recent
+   *  entry instead would silently mis-attribute parallel tasks across
+   *  multiple parents (parent A fires Task at t, parent B fires Task
+   *  at t+5; when A's helper arrives at t+10 we'd previously hand it
+   *  to B). Skips parents whose presence is gone so we don't draw a
+   *  tether to nobody. */
   private consumeRecentTaskParent(
     now: number,
   ): { parentId: string; subagentType?: string } | undefined {
     let bestId: string | undefined;
-    let bestTs = 0;
+    let bestTs = Infinity;
     for (const [parentId, queue] of this.recentTaskByParent) {
       if (!this.presence.has(parentId)) continue;
       const oldest = queue[0];
       if (!oldest) continue;
       if (now - oldest.at > TASK_SPAWN_WINDOW_MS) continue;
-      if (oldest.at > bestTs) {
+      if (oldest.at < bestTs) {
         bestTs = oldest.at;
         bestId = parentId;
       }
@@ -578,6 +685,50 @@ export class HookProvider implements AgentProvider {
     const entry = queue.shift();
     if (queue.length === 0) this.recentTaskByParent.delete(bestId);
     return { parentId: bestId, subagentType: entry?.subagentType };
+  }
+
+  /** When a parent's `Task` PreToolUse arrives AFTER a child's first
+   *  hook (curl ordering race), claim the oldest still-fresh orphan
+   *  child and patch its parentId via a second upsertAgent. Returns
+   *  true if an orphan was claimed, false otherwise. */
+  private claimOrphanChild(
+    now: number,
+    parentId: string,
+    subagentType: string | undefined,
+    api: AgentProviderAPI,
+  ): boolean {
+    let oldestId: string | undefined;
+    let oldestAt = Infinity;
+    for (const [childId, info] of this.orphanChildren) {
+      if (now - info.at > ORPHAN_CHILD_WINDOW_MS) continue;
+      if (childId === parentId) continue;
+      if (info.at < oldestAt) {
+        oldestAt = info.at;
+        oldestId = childId;
+      }
+    }
+    if (!oldestId) return false;
+    this.orphanChildren.delete(oldestId);
+    const childPresence = this.presence.get(oldestId);
+    if (!childPresence) return false;
+    childPresence.parentId = parentId;
+    this.presence.set(oldestId, childPresence);
+    api.upsertAgent({
+      id: oldestId,
+      displayName: prettyName(oldestId, childPresence.sessionId),
+      providerName: this.name,
+      cwd: childPresence.cwd,
+      metadata: {
+        sessionId: childPresence.sessionId,
+        terminalId: childPresence.terminalId,
+        external: childPresence.external,
+        model: childPresence.model,
+        provider: "claude",
+        parentId,
+        subagentType,
+      },
+    });
+    return true;
   }
 
   /**

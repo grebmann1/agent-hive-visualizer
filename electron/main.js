@@ -11,8 +11,37 @@ const { startHookServer } = require("./hook-server.js");
 const hookInstaller = require("./hook-installer.js");
 
 // Hook-server state — populated at app boot. The stop function is called
-// on quit so we release the port cleanly.
+// on quit so we release the port cleanly. `hookBindError` is set when
+// startHookServer returned null (every retry port was busy or another
+// fatal listen error); cleared on a successful (re-)bind. Surfaced via
+// the `hooks:status` IPC so the UI can show a distinct "can't open
+// port" state instead of the silent "no events" we used to ship.
 let hookServerHandle = null;
+let hookBindError = null;
+
+// Bounded ring buffer of forwarded hook payloads. Hooks can fire before
+// the renderer has mounted (cold launch) or during a React strict-mode
+// unmount/mount window in dev — webContents.send drops to a window with
+// no live listeners. We keep the last HOOK_BUFFER_CAP entries here and
+// replay anything-the-renderer-missed via the `hooks:replay` IPC the
+// first time it subscribes (and on every reload). Each entry carries a
+// monotonic `seq` so the renderer can dedupe across replay + live.
+const HOOK_BUFFER_CAP = 200;
+const hookEventBuffer = [];
+let nextHookSeq = 1;
+let lastHookEventAt = 0;
+
+function pushHookEvent(payload) {
+  const entry = { seq: nextHookSeq++, payload };
+  hookEventBuffer.push(entry);
+  if (hookEventBuffer.length > HOOK_BUFFER_CAP) {
+    hookEventBuffer.splice(0, hookEventBuffer.length - HOOK_BUFFER_CAP);
+  }
+  lastHookEventAt = Date.now();
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("claude:hook", entry);
+  }
+}
 
 // Walk a process's ancestry up to 8 levels looking for a known terminal
 // emulator. Returns the AppleScript-compatible app name for `tell
@@ -218,6 +247,59 @@ function registerHookHandlers() {
     }
   });
 
+  // Composite health view of the hook pipeline. Combines: whether the
+  // wrapper script is installed (`hookInstaller.isHooksInstalled`),
+  // whether our local HTTP receiver is bound (`hookServerHandle.port`),
+  // and how recently a hook actually arrived. The UI uses this to draw
+  // a distinct "AgentQuest can't open its hook port" state — previously
+  // a bind failure looked identical to "no agents running".
+  ipcMain.handle("hooks:status", () => {
+    let installed = false;
+    try {
+      installed = hookInstaller.isHooksInstalled();
+    } catch {
+      installed = false;
+    }
+    return {
+      installed,
+      port: hookServerHandle?.port ?? null,
+      bound: !!hookServerHandle,
+      bindError: hookBindError,
+      lastEventAt: lastHookEventAt || null,
+    };
+  });
+
+  // Try to (re-)bind the hook server. Used by the banner's "RETRY"
+  // button after a startup bind failure. Safe to call when already
+  // bound — short-circuits to success.
+  ipcMain.handle("hooks:rebind", async () => {
+    if (hookServerHandle) {
+      return { ok: true, port: hookServerHandle.port };
+    }
+    hookServerHandle = await startHookServer((payload) => {
+      pushHookEvent(payload);
+    });
+    if (!hookServerHandle) {
+      return { ok: false, error: hookBindError };
+    }
+    hookBindError = null;
+    return { ok: true, port: hookServerHandle.port };
+  });
+
+  // Replay any hooks the renderer missed. The renderer passes the highest
+  // `seq` it has already processed (0 on first attach); we return every
+  // newer entry. Keeps the buffer in main — repeat callers only ever see
+  // newer entries, so duplicate replay across React strict-mode mounts
+  // doesn't double up events.
+  ipcMain.handle("hooks:replay", (_event, payload) => {
+    const since =
+      payload && typeof payload === "object" && Number.isFinite(payload.sinceSeq)
+        ? Number(payload.sinceSeq)
+        : 0;
+    const entries = hookEventBuffer.filter((e) => e.seq > since);
+    return { entries, latestSeq: nextHookSeq - 1 };
+  });
+
   ipcMain.handle("hooks:openSettings", () => {
     try {
       shell.showItemInFolder(hookInstaller.settingsPath());
@@ -369,10 +451,15 @@ app.whenReady().then(async () => {
   // fires hooks — doesn't matter if the renderer hasn't mounted yet;
   // events queue up in the IPC channel.
   hookServerHandle = await startHookServer((payload) => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send("claude:hook", payload);
-    }
+    pushHookEvent(payload);
   });
+  if (!hookServerHandle) {
+    hookBindError =
+      "Couldn't open the hook port (47329-47333). Another app may be using it.";
+    console.warn(`[agentquest] ${hookBindError}`);
+  } else {
+    hookBindError = null;
+  }
   registerClaudeAskHandlers();
   registerTerminalHandlers();
   registerAgentFocusHandler();

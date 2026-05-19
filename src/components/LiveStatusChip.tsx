@@ -25,6 +25,12 @@ function formatAge(ms: number | null): string {
   return `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1000)}s`;
 }
 
+interface HookStatus {
+  installed: boolean;
+  bound: boolean;
+  bindError: string | null;
+}
+
 export default function LiveStatusChip() {
   const events = useAgentStore((s) => s.events);
   const dynamic = useNpcStore((s) => s.dynamic);
@@ -34,6 +40,37 @@ export default function LiveStatusChip() {
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
+  }, []);
+
+  // Poll hook-server status every 5s so the chip distinguishes "no
+  // agents running" (idle) from "AgentQuest can't open its hook port"
+  // (broken). Without this, both render as red+0 agents.
+  const [hookStatus, setHookStatus] = useState<HookStatus | null>(null);
+  useEffect(() => {
+    const bridge =
+      typeof window !== "undefined" ? window.agentquest : undefined;
+    if (!bridge?.hooks?.status) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const s = await bridge.hooks!.status!();
+        if (!cancelled) {
+          setHookStatus({
+            installed: s.installed,
+            bound: s.bound,
+            bindError: s.bindError,
+          });
+        }
+      } catch {
+        // ignore — status is advisory
+      }
+    };
+    poll();
+    const t = setInterval(poll, 5_000);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
   }, []);
 
   // Rolling 5s event count — count events whose timestamp is within WINDOW_MS
@@ -63,9 +100,15 @@ export default function LiveStatusChip() {
     return now - t;
   }, [events, now]);
 
-  // Dot color.
+  // Dot color. Hook-server bind failure dominates everything else —
+  // no point reporting "stale" if the receiver isn't even listening.
+  const hookBroken = hookStatus
+    ? hookStatus.installed && !hookStatus.bound
+    : false;
   let dot: "green" | "amber" | "red" = "red";
-  if (agentCount === 0 || lastEventAgeMs === null) {
+  if (hookBroken) {
+    dot = "red";
+  } else if (agentCount === 0 || lastEventAgeMs === null) {
     dot = "red";
   } else if (lastEventAgeMs < STALE_AMBER_MS) {
     dot = "green";
@@ -102,13 +145,27 @@ export default function LiveStatusChip() {
             boxShadow: `0 0 6px ${dotColor}`,
           }}
         />
-        <span className="tracking-wide">
-          {agentCount} AGENT{agentCount === 1 ? "" : "S"}
-        </span>
-        <span className="opacity-60">·</span>
-        <span className="tabular-nums">{eventsIn5s} EV/5S</span>
-        <span className="opacity-60">·</span>
-        <span className="tabular-nums">{formatAge(lastEventAgeMs)} AGO</span>
+        {hookBroken ? (
+          <span
+            className="tracking-wide"
+            style={{ color: "#ef4444" }}
+            title={hookStatus?.bindError ?? undefined}
+          >
+            ! HOOK SERVER
+          </span>
+        ) : (
+          <>
+            <span className="tracking-wide">
+              {agentCount} AGENT{agentCount === 1 ? "" : "S"}
+            </span>
+            <span className="opacity-60">·</span>
+            <span className="tabular-nums">{eventsIn5s} EV/5S</span>
+            <span className="opacity-60">·</span>
+            <span className="tabular-nums">
+              {formatAge(lastEventAgeMs)} AGO
+            </span>
+          </>
+        )}
       </div>
       {open && (
         <div
@@ -116,14 +173,20 @@ export default function LiveStatusChip() {
           className="absolute right-0 top-full mt-2 z-40 panel pixel-font text-[10px] min-w-[260px]"
           style={{ padding: 10 }}
         >
-          <PipelineDetail now={now} />
+          <PipelineDetail now={now} hookStatus={hookStatus} />
         </div>
       )}
     </div>
   );
 }
 
-function PipelineDetail({ now }: { now: number }) {
+function PipelineDetail({
+  now,
+  hookStatus,
+}: {
+  now: number;
+  hookStatus: HookStatus | null;
+}) {
   const events = useAgentStore((s) => s.events);
   const dynamic = useNpcStore((s) => s.dynamic);
 
@@ -140,8 +203,20 @@ function PipelineDetail({ now }: { now: number }) {
         (e.metadata as { toolName?: string } | undefined)?.toolName),
   );
   const hasAnyEvent = recentlyActiveEvents.length > 0;
+  const serverOk = hookStatus ? hookStatus.installed && hookStatus.bound : true;
 
   const stages: Array<{ name: string; ok: boolean; note: string }> = [
+    {
+      name: "Server",
+      ok: serverOk,
+      note: !hookStatus
+        ? "status unavailable"
+        : !hookStatus.installed
+          ? "wrapper not installed"
+          : !hookStatus.bound
+            ? hookStatus.bindError ?? "port unavailable"
+            : "loopback receiver bound",
+    },
     {
       name: "Hooks",
       ok: hasDetectedAgent,
