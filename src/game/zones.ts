@@ -60,6 +60,12 @@ export function setExteriorAnchors(next: typeof exteriorAnchors): void {
   Object.assign(EXTERIOR_ANCHORS, next);
 }
 
+let reachableRoomSet = new Set<RoomId>();
+
+export function isRoomReachable(room: RoomId): boolean {
+  return reachableRoomSet.size === 0 || reachableRoomSet.has(room);
+}
+
 export interface InteriorZoneBundle {
   zone: ZoneDef;
   parsed: ParsedMap;
@@ -84,30 +90,30 @@ export async function loadInteriorZone(): Promise<InteriorZoneBundle> {
   // log so the user notices.
   setExteriorAnchors(pickStartOrFallback(parsed));
 
-  // Reachability check: warn (in dev) for any room whose anchor isn't
-  // in the same connected component as the entry. Tiled-side fix: cut
-  // a 1-cell gap in the Collision wall between the corridor and that
-  // room.
-  if (typeof window !== "undefined") {
-    const components = floodComponents(parsed);
-    const entryId = components.componentIdAt(
-      EXTERIOR_ANCHORS.entry.col,
-      EXTERIOR_ANCHORS.entry.row,
+  // Reachability check: build a set of rooms reachable from the entry
+  // point. Agents will only be routed to reachable rooms; unreachable
+  // ones fall back to the nearest reachable alternative.
+  const components = floodComponents(parsed);
+  const entryId = components.componentIdAt(
+    EXTERIOR_ANCHORS.entry.col,
+    EXTERIOR_ANCHORS.entry.row,
+  );
+  reachableRoomSet = new Set<RoomId>();
+  const unreachable: string[] = [];
+  for (const room of parsed.rooms) {
+    const id = components.componentIdAt(room.anchor.col, room.anchor.row);
+    if (id !== null && id === entryId) {
+      reachableRoomSet.add(room.id);
+    } else {
+      unreachable.push(`${room.label} (${room.anchor.col},${room.anchor.row})`);
+    }
+  }
+  if (unreachable.length > 0 && typeof window !== "undefined") {
+    console.warn(
+      `[zones] ${unreachable.length} rooms unreachable from entry — agents will stay where they spawn.\n` +
+        `  Cut a 1-cell gap in the Collision layer between the corridor and:\n` +
+        unreachable.map((r) => `    • ${r}`).join("\n"),
     );
-    const unreachable: string[] = [];
-    for (const room of parsed.rooms) {
-      const id = components.componentIdAt(room.anchor.col, room.anchor.row);
-      if (id === null || id !== entryId) {
-        unreachable.push(`${room.label} (${room.anchor.col},${room.anchor.row})`);
-      }
-    }
-    if (unreachable.length > 0) {
-      console.warn(
-        `[zones] ${unreachable.length} rooms unreachable from entry — agents will stay where they spawn.\n` +
-          `  Cut a 1-cell gap in the Collision layer between the corridor and:\n` +
-          unreachable.map((r) => `    • ${r}`).join("\n"),
-      );
-    }
   }
   const zone: ZoneDef = {
     id: "interior",

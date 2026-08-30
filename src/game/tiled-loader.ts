@@ -36,6 +36,8 @@ export interface TileGrid {
   data: number[]; // row-major; gid 0 = empty
 }
 
+export type SeatOrientation = "up" | "down" | "left" | "right";
+
 export interface ObjectRect {
   /** True if `collidable` property is true. False rects are render-only or markers. */
   collidable: boolean;
@@ -48,6 +50,8 @@ export interface ObjectRect {
   y: number;
   width: number;
   height: number;
+  /** Authored facing direction for seat objects. */
+  orientation?: SeatOrientation;
 }
 
 // Imported only as a type so RoomId stays in events/types and we don't
@@ -73,6 +77,14 @@ export interface CellCoord {
   row: number;
 }
 
+/** A seat's authored category, derived from the Tiled object name.
+ *  "home" — generic Desk/Seat workstations, used for stable per-agent
+ *           home-desk assignment.
+ *  "lounge" / "coffee" / "meeting" / "devops" — opportunistic seats
+ *           claimed dynamically (e.g. an agent on break grabs any
+ *           free coffee stool, not "their" coffee stool). */
+export type SeatCategory = "home" | "lounge" | "coffee" | "meeting" | "devops";
+
 /** A seat object: cell-coords for pathfinding plus the authored
  *  pixel-center so the sprite can land exactly on the chair sprite
  *  (which is usually smaller than a tile and pixel-aligned to one
@@ -80,6 +92,8 @@ export interface CellCoord {
 export interface SeatCell extends CellCoord {
   px: number;
   py: number;
+  orientation?: SeatOrientation;
+  category: SeatCategory;
 }
 
 export interface DeskRect {
@@ -354,7 +368,16 @@ async function fetchAndParse(url: string): Promise<ParsedMap> {
       const seatProp = props.some(
         (p) => p.name === "seat" && p.value === true,
       );
+      const orientationRaw = props.find(
+        (p) => p.name === "orientation" && typeof p.value === "string",
+      )?.value as string | undefined;
+      const orientation: SeatOrientation | undefined =
+        orientationRaw &&
+        (["up", "down", "left", "right"] as string[]).includes(orientationRaw)
+          ? (orientationRaw as SeatOrientation)
+          : undefined;
       const name = o.name ?? "";
+      const SEAT_NAMES = ["seat", "coffeeseat", "loungeseat", "meetingseat", "devopsseat"];
       objects.push({
         name,
         x: o.x + dx,
@@ -362,7 +385,8 @@ async function fetchAndParse(url: string): Promise<ParsedMap> {
         width: o.width,
         height: o.height,
         collidable,
-        seat: seatProp || name.toLowerCase() === "seat",
+        seat: seatProp || SEAT_NAMES.includes(name.toLowerCase()),
+        orientation,
       });
     }
   }
@@ -444,9 +468,30 @@ function deriveSeatCells(
     const key = `${col},${row}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push({ col, row, px: cx, py: cy });
+    out.push({
+      col,
+      row,
+      px: cx,
+      py: cy,
+      orientation: obj.orientation,
+      category: seatCategoryForName(obj.name),
+    });
   }
   return out;
+}
+
+/** Map an authored Tiled object name onto a SeatCategory. Generic
+ *  "Seat"/anonymous rects become "home" — those are the per-agent
+ *  workstations. Named variants (CoffeeSeat, LoungeSeat, MeetingSeat,
+ *  DevOpsSeat) keep their authored category so they can be claimed
+ *  opportunistically (lounge break, meeting cluster, etc). */
+function seatCategoryForName(rawName: string): SeatCategory {
+  const n = rawName.toLowerCase();
+  if (n === "coffeeseat") return "coffee";
+  if (n === "loungeseat") return "lounge";
+  if (n === "meetingseat") return "meeting";
+  if (n === "devopsseat") return "devops";
+  return "home";
 }
 
 /** Convert each `Desk` object to its cell-coord bounds. Decor only. */
@@ -468,6 +513,7 @@ function deriveDeskRects(
   }
   return out;
 }
+
 
 /** Derive RoomAnchorRects from named objects whose names match
  *  ROOM_NAME_TO_ID. The anchor is a walkable cell near the rect's

@@ -17,16 +17,17 @@ import { buildLiveGreeting, useNpcStore } from "../stores/useNpcStore";
 import { useWorldBus } from "../stores/useWorldBus";
 import { GB, TILE_SIZE } from "./palette";
 import { type NpcDef } from "./npcs";
-import { bfs } from "./pathfind";
 import { ROOM_ANCHORS, getRoomRegions, roomIdForCell } from "./rooms";
 import { roomById } from "./room-registry";
 import {
   EXTERIOR_ANCHORS,
+  isRoomReachable,
   isWalkableIn,
   loadInteriorZone,
   type ZoneDef,
 } from "./zones";
-import { resolveGid, type DeskRect, type SeatCell } from "./tiled-loader";
+import { resolveGid, type SeatCell } from "./tiled-loader";
+import { GameSdk, type ManagedEntity } from "./sdk";
 import { download as downloadAgentLog, logAgent, size as agentLogSize } from "./agentLog";
 import {
   type ChoreoHandle,
@@ -125,11 +126,6 @@ const IDLE_FRAME = {
   right: [18, 19, 20, 21],
 } as const;
 
-// Camera control constants (v2.0 free-pan mode).
-const DRAG_THRESHOLD_PX = 4;
-const ZOOM_MIN = 1;
-const ZOOM_MAX = 3;
-
 /** Label shown on the overhead pill. Prefers the agent's display name
  *  so it matches the right-side roster row exactly. Falls back to the
  *  cwd basename, then a stable 4-char id suffix. Truncated to 14
@@ -148,52 +144,22 @@ function pillLabelFor(def: {
   return tail.toUpperCase() || "??";
 }
 
-interface Entity {
-  sprite: Phaser.GameObjects.Sprite;
-  shadow: Phaser.GameObjects.Rectangle;
-  indicator?: Phaser.GameObjects.Text;
-  // Always-on overhead pill: a small rounded rect showing the agent's short
-  // code + an emoji reflecting the current tool or state. Re-rendered on
-  // every activity update; repositioned each frame in update().
-  overheadContainer?: Phaser.GameObjects.Container;
-  overheadBg?: Phaser.GameObjects.Graphics;
-  overheadCodeText?: Phaser.GameObjects.Text;
-  overheadEmojiText?: Phaser.GameObjects.Text;
-  // Transient error flash: when a tool_result with isError arrives we swap
-  // the emoji to ❌ for 800 ms then return to this baseline.
-  overheadBaselineEmoji?: string;
-  overheadErrorUntil?: number;
-  // Transient "user just spoke" flash — 📨 for a couple seconds when a
-  // UserPromptSubmit hook fires. Decays the same way as the error flash.
-  overheadPromptUntil?: number;
-  col: number;
-  row: number;
-  facing: Direction;
-  animKey: string; // prefix used for this entity's anims
-  // Texture key for this NPC's idle-loop sheet. Played as the resting
-  // animation when the agent is not walking, choreoing, or sitting.
+// WorldScene's NPC record shape. Extends `ManagedEntity` (the SDK's
+// canonical entity type) with WorldScene-only fields: cached sprite-sheet
+// keys and the optional sub-agent helper sprite. Every state/visual/overlay
+// field lives at its `ManagedEntity` location (e.g. `entity.state.col`,
+// `entity.visuals.sprite`, `entity.overlays.indicator`) so the SDK and
+// WorldScene operate on the same object graph.
+type Entity = ManagedEntity & {
+  /** Walk-cycle sprite-sheet key (e.g. "modern_adam"). */
+  animKey: string;
+  /** Idle-loop sprite-sheet key (e.g. "modern_adam_idle"). */
   idleAnimKey: string;
-  // Texture key for the seated pose sheet (frame indexed by SIT_FRAME).
+  /** Seated-pose sprite-sheet key (e.g. "modern_adam_sit"). */
   sitSheetKey: string;
-  // Baseline sprite scale between choreos. 1 for normal NPCs, 0.8 for
-  // sub-agents so they read as smaller/subordinate even at rest. Choreo
-  // startChoreoFor/stop must respect this to avoid snapping back to 1.
-  restingScale: number;
-  // Active per-tool choreography (set by subscribeStores on activity events).
-  choreo?: { kind: ChoreoKind; handle: ChoreoHandle; startedAt: number };
-  // Helper sprite spawned while the agent is running a `Task` (sub-agent).
+  /** Helper "dwarf" sprite spawned while the agent is running a Task tool. */
   helper?: HelperSprite;
-  // Floating "HELPER" badge above sub-agent sprites (parented NPCs only).
-  helperBadge?: Phaser.GameObjects.Text;
-  // Where this NPC is currently walking. Set by walkNpcToRoom and
-  // cleared once the path drains; read by the transit indicator badge.
-  transitTarget?: RoomId;
-  transitBadge?: Phaser.GameObjects.Text;
-  transitText?: string;
-  // Hover state: when true the pill renders the name + emoji + bg;
-  // when false only the emoji shows so the world looks less busy.
-  pillHover?: boolean;
-}
+};
 
 interface HelperSprite {
   sprite: Phaser.GameObjects.Sprite;
@@ -203,10 +169,15 @@ interface HelperSprite {
 }
 
 export class WorldScene extends Phaser.Scene {
-  private npcs = new Map<string, Entity & { def: NpcDef; tween?: Phaser.Tweens.Tween }>();
+  private npcs = new Map<string, Entity>();
 
-  // npc auto-walk state — one path per NPC
-  private npcPaths = new Map<string, { col: number; row: number }[]>();
+  // GameSdk — the single movement/choreo/interaction backend. Built
+  // partway through `create()` (after the async map load), but Phaser
+  // starts pumping `update()` as soon as `create()` is called, so the
+  // first handful of frames see `sdk === undefined`. All read sites
+  // optional-chain (`this.sdk?.…`); methods that need the SDK to exist
+  // are only invoked from event handlers wired up after assignment.
+  private sdk: GameSdk | undefined;
 
   // visualizer store
   private unsubscribeAgents: (() => void) | null = null;
@@ -218,19 +189,6 @@ export class WorldScene extends Phaser.Scene {
   // current zone (always interior now)
   private zone!: ZoneDef;
 
-  // Free-pan camera state (v2.0). `dragStart` captures the pointer + scroll
-  // position at mousedown; `isDragging` flips true once the pointer moves
-  // past DRAG_THRESHOLD_PX so we can distinguish a drag from a click.
-  private dragStart: {
-    x: number;
-    y: number;
-    scrollX: number;
-    scrollY: number;
-  } | null = null;
-  private isDragging = false;
-  // Which NPC (if any) was under the pointer at mousedown time. Becomes the
-  // click target at mouseup if no drag happened.
-  private pointerDownNpcId: string | null = null;
   // Throttle for follow-mode camera pan so we don't restart the tween each frame.
   private lastFollowPanAt = 0;
   // True once the user has panned/zoomed. Used to decide whether panel
@@ -268,21 +226,9 @@ export class WorldScene extends Phaser.Scene {
   private tetherGfx!: Phaser.GameObjects.Graphics;
 
   // Cinema loop — idle NPCs head to the Cinema and sit on a seat.
-  // Replaced the old wanderTick (which moved NPCs to random rooms for no
-  // reason). NPCs now only move for real activity OR to/from the cinema.
   private idleSitTimer: Phaser.Time.TimerEvent | null = null;
-  // Last time an NPC did something real (tool activity or summon). Used to
-  // gate the cinema loop — we only send them to the cinema after a quiet
-  // window, so we don't yank a just-walked NPC back.
+  // Last time an NPC did something real (tool activity or summon).
   private lastActivityAt = new Map<string, number>();
-  // Claimed cinema seats: npcId -> seat key. A seat key is "col,row".
-  private occupiedSeats = new Map<string, string>();
-  // Inverse lookup so we can release a seat without scanning.
-  private seatByNpc = new Map<string, SeatCell>();
-  // Pixel-precise final position for an in-progress walkNpcToCell.
-  // Used to land sprites on the seat's authored center instead of
-  // the tile center on the LAST step of the path. Cleared on arrival.
-  private npcSeatOffset = new Map<string, { px: number; py: number }>();
   // Counter-state for each summon tick so we only act on increments.
   private lastSeenSummonTicks: Record<string, number> = {};
 
@@ -353,7 +299,7 @@ export class WorldScene extends Phaser.Scene {
       );
       // Sit sheet — directional 24-frame variant (6 frames per
       // direction, same layout as the run/idle sheets). Indexing via
-      // SIT_FRAME[npc.facing] picks the back/side/front pose so a
+      // SIT_FRAME[npc.state.facing] picks the back/side/front pose so a
       // seated agent faces their desk instead of the camera.
       this.load.spritesheet(
         MODERN_SIT_KEY(c),
@@ -403,10 +349,10 @@ export class WorldScene extends Phaser.Scene {
    *  (typing/reading/etc) overwrite the frame manually each tick, so
    *  this never fights tool poses. */
   private playIdleAnim(npc: Entity) {
-    if (!npc.sprite || !npc.sprite.scene) return;
-    const animKey = `${npc.idleAnimKey}-idle-${npc.facing}`;
+    if (!npc.visuals.sprite || !npc.visuals.sprite.scene) return;
+    const animKey = `${npc.idleAnimKey}-idle-${npc.state.facing}`;
     if (!this.anims.exists(animKey)) return;
-    npc.sprite.play(animKey, true);
+    npc.visuals.sprite.play(animKey, true);
   }
 
   /** Per-agent tint — deterministic from id so the same agent keeps
@@ -442,10 +388,31 @@ export class WorldScene extends Phaser.Scene {
     // the LOADER_COMPLETE event.
     const bundle = await loadInteriorZone();
     this.zone = bundle.zone;
-    // Cache the authored seat cells so claimFreeSeat / tickIdleSit / the
-    // post-spawn flow can look them up without re-reading the manifest.
-    this.seatCells = bundle.parsed.seatCells.slice();
-    this.deskRects = bundle.parsed.deskRects.slice();
+
+    // GameSdk owns movement / choreo / interaction. It seeds its own
+    // seat manager from `seatCells` + `deskRects`, registers pointer
+    // handlers, and emits `interact:click` for the dialog open path.
+    this.sdk = new GameSdk(this);
+    this.sdk.init({
+      seatCells: bundle.parsed.seatCells.slice(),
+      deskRects: bundle.parsed.deskRects.slice(),
+      walkableFn: (col, row) => this.isWalkableHere(col, row),
+      movementCallbacks: {
+        onSeatedAtSeat: (id) => {
+          const npc = this.npcs.get(id);
+          if (npc) this.startChoreoFor(npc, "sit-down");
+        },
+      },
+    });
+    // Greeting-aware dialog: InteractionSystem only emits the click
+    // event; WorldScene owns the greeting text + dialog open path.
+    this.sdk.bus.on("interact:click", ({ id }) => this.openDialogForNpc(id));
+    // First user pan/zoom flips this so panel resizes stop auto-fitting
+    // the viewport (otherwise the user's manual framing would be reset
+    // every time the layout reflows).
+    this.sdk.bus.on("camera:moved", () => {
+      this.hasUserMovedCamera = true;
+    });
     // Snapshot the raw Tiled objects so the debug overlay can outline
     // every authored rect (rooms, seats, decor, collision) without
     // re-fetching the .tmj.
@@ -458,7 +425,7 @@ export class WorldScene extends Phaser.Scene {
       collidable: o.collidable,
       seat: o.seat,
     }));
-    if (this.seatCells.length === 0 && typeof window !== "undefined") {
+    if (this.mvTotalSeats() === 0 && typeof window !== "undefined") {
       console.warn(
         `[world] no seat objects in the .tmj — agents won't claim a desk after spawn.`,
       );
@@ -498,7 +465,10 @@ export class WorldScene extends Phaser.Scene {
     this.drawMap();
     this.createAnims();
     this.createNpcs();
-    this.setupMouseInput();
+    // InteractionSystem.setup() (called from GameSdk.init() above)
+    // already registered pointerdown/move/up/wheel handlers and per-sprite
+    // hover wiring; the legacy setupMouseInput() path was deleted with the
+    // movement backend.
     this.subscribeStores();
     this.startIdleSitLoop();
     this.subscribeWorldLifeFlag();
@@ -592,13 +562,9 @@ export class WorldScene extends Phaser.Scene {
       this.unsubscribeSettings = null;
       this.worldLifeLastToolAt.clear();
       // Clear all scene-local state. scene.restart() reuses the same
-      // instance so class-field maps persist across restarts — an old
-      // walk path targeting a now-destroyed sprite crashes tickNpcPaths.
-      this.npcPaths.clear();
+      // instance so class-field maps persist across restarts.
+      this.sdk?.destroy();
       this.npcs.clear();
-      this.occupiedSeats.clear();
-      this.seatByNpc.clear();
-      this.npcSeatOffset.clear();
       this.lastActivityAt.clear();
     });
   }
@@ -609,43 +575,9 @@ export class WorldScene extends Phaser.Scene {
   // random-wander loop so NPCs only move for a concrete reason.
   // --------------------------------------------------------------------
 
-  // Live list of seat cells, populated from `parsed.seatCells` (objects
-  // with `seat: true` in the .tmj). Set in create() once the map loads;
-  // empty until then so claimFreeSeat is a no-op pre-load. The 60s-idle
-  // cinema loop and the post-spawn assignment both walk this list.
-  private seatCells: SeatCell[] = [];
-  // Cell-coord bounds of every "Desk" object — read at seat-snap time
-  // so a seated agent faces the nearest desk instead of the camera.
-  private deskRects: DeskRect[] = [];
 
-  /** Pick which way a seated agent should face. We look for the
-   *  nearest desk rect to the seat cell and return up/down/left/right
-   *  based on the dominant axis. Falls back to "up" (the dominant
-   *  layout in the authored map) when no desks exist. */
   private deskFacingFor(col: number, row: number): Direction {
-    if (this.deskRects.length === 0) return "up";
-    const cx = col + 0.5;
-    const cy = row + 0.5;
-    let best: DeskRect | null = null;
-    let bestDist = Infinity;
-    for (const d of this.deskRects) {
-      const dcx = (d.colMin + d.colMax + 1) / 2;
-      const dcy = (d.rowMin + d.rowMax + 1) / 2;
-      const dx = dcx - cx;
-      const dy = dcy - cy;
-      const dist = dx * dx + dy * dy;
-      if (dist < bestDist) {
-        bestDist = dist;
-        best = d;
-      }
-    }
-    if (!best) return "up";
-    const dcx = (best.colMin + best.colMax + 1) / 2;
-    const dcy = (best.rowMin + best.rowMax + 1) / 2;
-    const dx = dcx - cx;
-    const dy = dcy - cy;
-    if (Math.abs(dx) > Math.abs(dy)) return dx > 0 ? "right" : "left";
-    return dy > 0 ? "down" : "up";
+    return this.mvDeskFacingFor(col, row);
   }
 
   private startIdleSitLoop() {
@@ -764,75 +696,97 @@ export class WorldScene extends Phaser.Scene {
 
     for (const npc of this.npcs.values()) {
       // Already mid-path? Leave them alone.
-      if (this.npcPaths.has(npc.def.id)) continue;
+      if (this.mvHasPlan(npc.state.def.id)) continue;
       // Already seated?
-      if (this.seatByNpc.has(npc.def.id)) continue;
+      if (this.mvIsSeated(npc.state.def.id)) continue;
       // Not idle long enough yet.
-      const last = this.lastActivityAt.get(npc.def.id) ?? 0;
+      const last = this.lastActivityAt.get(npc.state.def.id) ?? 0;
       if (last !== 0 && now - last < IDLE_MS) continue;
       // Sub-agents follow their parent; don't drag them to the lounge.
-      if ((npc.def as { parentId?: string }).parentId) continue;
+      if ((npc.state.def as { parentId?: string }).parentId) continue;
 
-      // Prefer routing idle agents to the lounge (coffee bar) — feels
-      // more alive than every agent silently snapping back to a desk.
-      // Fall back to a free seat if the map has no lounge anchor.
-      if (loungeAvailable) {
-        this.walkNpcToRoom(npc.def.id, "lounge");
-        if (!this.lastActivityAt.has(npc.def.id)) {
-          this.lastActivityAt.set(npc.def.id, now);
-        }
+      // Prefer claiming a lounge seat (coffee bar stool) so the agent
+      // lands on the actual chair sprite instead of the room anchor.
+      // Fall back to any free seat, then to walkNpcToRoom as last resort.
+      const seat = loungeAvailable
+        ? this.claimFreeSeatInRoom(npc.state.def.id, "lounge") ?? this.claimFreeSeat(npc.state.def.id)
+        : this.claimFreeSeat(npc.state.def.id);
+      if (seat) {
+        this.walkNpcToCell(npc.state.def.id, seat.col, seat.row, {
+          px: seat.px,
+          py: seat.py,
+          orientation: seat.orientation,
+        });
+      } else if (loungeAvailable) {
+        this.walkNpcToRoom(npc.state.def.id, "lounge");
+      } else {
         continue;
       }
-
-      const seat = this.claimFreeSeat(npc.def.id);
-      if (!seat) continue;
-
-      this.walkNpcToCell(npc.def.id, seat.col, seat.row, {
-        px: seat.px,
-        py: seat.py,
-      });
       // Record an activity timestamp at the cinema-departure moment so the
       // loop doesn't immediately re-fire for the next NPC on the same tick
       // that happens to land on the same quiet threshold.
-      if (!this.lastActivityAt.has(npc.def.id)) {
-        this.lastActivityAt.set(npc.def.id, now);
+      if (!this.lastActivityAt.has(npc.state.def.id)) {
+        this.lastActivityAt.set(npc.state.def.id, now);
       }
     }
   }
 
+  // Façade methods optional-chain through `this.sdk` because Phaser
+  // can pump `update()` (and therefore any caller) before the async
+  // `create()` finishes assigning the SDK. Pre-init falls through to
+  // sensible no-op defaults — the same pattern the legacy director used.
+
   private claimFreeSeat(npcId: string): SeatCell | null {
-    for (const seat of this.seatCells) {
-      const key = `${seat.col},${seat.row}`;
-      if (this.occupiedSeats.has(key)) continue;
-      this.occupiedSeats.set(key, npcId);
-      this.seatByNpc.set(npcId, seat);
-      return seat;
-    }
-    return null;
+    return this.sdk?.movement.claimFreeSeat(npcId) ?? null;
+  }
+
+  private claimFreeSeatInRoom(npcId: string, room: RoomId): SeatCell | null {
+    return this.sdk?.movement.claimFreeSeatInRoom(npcId, room) ?? null;
   }
 
   private releaseSeat(npcId: string) {
-    const seat = this.seatByNpc.get(npcId);
-    if (!seat) return;
-    this.seatByNpc.delete(npcId);
-    this.occupiedSeats.delete(`${seat.col},${seat.row}`);
-    // Restore the standing texture so the next walk anim plays from
-    // the run sheet rather than the seated one.
-    const npc = this.npcs.get(npcId);
-    if (npc?.sprite?.scene && npc.sprite.texture.key !== npc.animKey) {
-      try {
-        npc.sprite.setTexture(npc.animKey, FRAME[npc.facing][0]);
-        logAgent({
-          ts: Date.now(),
-          scene: this.time.now,
-          agentId: npcId,
-          kind: "texture-swap",
-          note: `seat → run (${npc.animKey})`,
-        });
-      } catch {
-        // ignore
-      }
-    }
+    // MovementSystem.releaseSeat handles the seat → run texture swap on
+    // its end, so this is a thin pass-through.
+    this.sdk?.movement.releaseSeat(npcId);
+  }
+
+  // --------------------------------------------------------------------
+  // Movement façade — thin pass-through to GameSdk.movement. Kept as
+  // wrappers so the rest of WorldScene stays decoupled from the SDK
+  // surface (lets us swap or extend MovementSystem without touching
+  // every call site).
+  // --------------------------------------------------------------------
+
+  private mvHasPlan(npcId: string): boolean {
+    return this.sdk?.movement.hasPlan(npcId) ?? false;
+  }
+
+  private mvIsSeated(npcId: string): boolean {
+    return this.sdk?.movement.isSeated(npcId) ?? false;
+  }
+
+  private mvGetSeat(npcId: string): SeatCell | undefined {
+    return this.sdk?.movement.getSeat(npcId);
+  }
+
+  private mvCancelMovement(npcId: string): void {
+    this.sdk?.movement.cancelPath(npcId);
+  }
+
+  private mvDeskFacingFor(col: number, row: number): Direction {
+    return this.sdk?.movement.deskFacingFor(col, row) ?? "down";
+  }
+
+  private mvOccupiedCount(): number {
+    return this.sdk?.movement.occupiedCount ?? 0;
+  }
+
+  private mvTotalSeats(): number {
+    return this.sdk?.movement.totalSeats ?? 0;
+  }
+
+  private mvAllSeatCells(): readonly SeatCell[] {
+    return this.sdk?.movement.allSeatCells ?? [];
   }
 
   /**
@@ -852,8 +806,8 @@ export class WorldScene extends Phaser.Scene {
     // Grow the hit box as zoom decreases so small on-screen sprites remain clickable.
     const HIT = Math.max(TILE_SIZE / 2, (TILE_SIZE / 2) / cam.zoom);
     for (const [id, npc] of this.npcs) {
-      const cx = npc.sprite.x;
-      const cy = npc.sprite.y - TILE_SIZE / 2;
+      const cx = npc.visuals.sprite.x;
+      const cy = npc.visuals.sprite.y - TILE_SIZE / 2;
       if (Math.abs(cx - world.x) <= HIT && Math.abs(cy - world.y) <= HIT) {
         return id;
       }
@@ -894,92 +848,15 @@ export class WorldScene extends Phaser.Scene {
     this.walkNpcToCell(id, target.col, target.row);
   }
 
-  /**
-   * Like walkNpcToRoom but targets an arbitrary cell. Used by the cinema
-   * loop (targets seats) and by summonNpc (targets tiles near the player).
-   *
-   * If `finalOffset` is supplied, the LAST step of the path lands on
-   * the offset's pixel center instead of the tile center — used so
-   * sprites rest on the actual chair art rather than near it.
-   */
   private walkNpcToCell(
     npcId: string,
     targetCol: number,
     targetRow: number,
-    finalOffset?: { px: number; py: number },
+    finalOffset?: { px: number; py: number; orientation?: Direction },
   ) {
     const npc = this.npcs.get(npcId);
     if (!npc) return;
-
-    const blocked: Array<{ col: number; row: number }> = [];
-    for (const other of this.npcs.values()) {
-      if (other.def.id === npcId) continue;
-      blocked.push({ col: other.col, row: other.row });
-    }
-    const path = bfs(npc.col, npc.row, targetCol, targetRow, { blocked });
-    if (path.length <= 1) {
-      // Already in the target cell. Slide (don't snap) onto the chair's
-      // authored pixel center so the move reads as a step, not a
-      // teleport. Skip the tween if we're already on the offset.
-      if (finalOffset) {
-        const fromX = npc.sprite.x;
-        const fromY = npc.sprite.y;
-        const dx = finalOffset.px - fromX;
-        const dy = finalOffset.py - fromY;
-        const facing = this.deskFacingFor(targetCol, targetRow);
-        npc.facing = facing;
-        const applySeatedPose = () => {
-          try {
-            npc.sprite.stop();
-            // Use the idle sheet's first frame for the chosen direction.
-            npc.sprite.setTexture(npc.idleAnimKey, IDLE_FRAME[facing][0]);
-          } catch {
-            // ignore
-          }
-        };
-        if (dx * dx + dy * dy < 0.25) {
-          // Sub-pixel difference — no tween needed.
-          applySeatedPose();
-        } else {
-          // Cancel any in-flight tween on this sprite to avoid a fight.
-          this.tweens.killTweensOf(npc.sprite);
-          this.tweens.killTweensOf(npc.shadow);
-          this.tweens.add({
-            targets: npc.sprite,
-            x: finalOffset.px,
-            y: finalOffset.py,
-            duration: STEP_DURATION_MS,
-            ease: "Linear",
-            onComplete: applySeatedPose,
-          });
-          this.tweens.add({
-            targets: npc.shadow,
-            x: finalOffset.px,
-            y: finalOffset.py + 7,
-            duration: STEP_DURATION_MS,
-            ease: "Linear",
-          });
-        }
-        logAgent({
-          ts: Date.now(),
-          scene: this.time.now,
-          agentId: npcId,
-          kind: "seat-snap",
-          fromX,
-          fromY,
-          toX: finalOffset.px,
-          toY: finalOffset.py,
-          note: `already-at-cell offset slide (face ${facing})`,
-        });
-      }
-      return;
-    }
-    this.npcPaths.set(npcId, path.slice(1));
-    if (finalOffset) {
-      this.npcSeatOffset.set(npcId, finalOffset);
-    } else {
-      this.npcSeatOffset.delete(npcId);
-    }
+    this.sdk?.movement.walkToCell(npcId, targetCol, targetRow, finalOffset);
   }
 
   // --------------------------------------------------------------------
@@ -1095,12 +972,12 @@ export class WorldScene extends Phaser.Scene {
       if (parent) {
         // Pick a free neighbour of the parent.
         const spots: Array<[number, number]> = [
-          [parent.col + 1, parent.row],
-          [parent.col - 1, parent.row],
-          [parent.col, parent.row + 1],
-          [parent.col, parent.row - 1],
-          [parent.col + 1, parent.row + 1],
-          [parent.col - 1, parent.row - 1],
+          [parent.state.col + 1, parent.state.row],
+          [parent.state.col - 1, parent.state.row],
+          [parent.state.col, parent.state.row + 1],
+          [parent.state.col, parent.state.row - 1],
+          [parent.state.col + 1, parent.state.row + 1],
+          [parent.state.col - 1, parent.state.row - 1],
         ];
         for (const [c, r] of spots) {
           if (this.isWalkableHere(c, r) && !this.isEntityAt(c, r)) {
@@ -1163,7 +1040,7 @@ export class WorldScene extends Phaser.Scene {
       if (ent.choreo && ent.choreo.kind !== "idle-bob") return;
       // Always pop relative to resting scale so multiple hovers in a
       // row don't compound (1.08× × 1.08× × … each pointerover).
-      const target = ent.restingScale * 1.08;
+      const target = ent.state.restingScale * 1.08;
       this.tweens.add({
         targets: sprite,
         scaleX: target,
@@ -1178,7 +1055,7 @@ export class WorldScene extends Phaser.Scene {
       ent.pillHover = false;
       this.renderPill(def.id);
       if (ent.choreo && ent.choreo.kind !== "idle-bob") return;
-      const target = ent.restingScale;
+      const target = ent.state.restingScale;
       this.tweens.add({
         targets: sprite,
         scaleX: target,
@@ -1261,24 +1138,39 @@ export class WorldScene extends Phaser.Scene {
     }
 
     this.npcs.set(def.id, {
-      def,
-      sprite,
-      shadow,
-      indicator,
-      overheadBg,
-      overheadCodeText,
-      overheadEmojiText,
-      overheadContainer,
+      state: {
+        id: def.id,
+        def,
+        col,
+        row,
+        facing: "down",
+        restingScale,
+        isSubAgent,
+        parentId: (def as { parentId?: string }).parentId,
+      },
+      visuals: {
+        sprite,
+        shadow,
+      },
+      overlays: {
+        indicator,
+        overheadBg,
+        overheadCodeText,
+        overheadEmojiText,
+        overheadContainer,
+        helperBadge,
+      },
       overheadBaselineEmoji: IDLE_EMOJI,
-      col,
-      row,
-      facing: "down",
       animKey: sheetKey,
       idleAnimKey,
       sitSheetKey,
-      restingScale,
-      helperBadge,
     });
+
+    // Hand the SDK a view onto the same record we just stored in
+    // `this.npcs` so MovementSystem / ChoreoSystem / InteractionSystem
+    // can read and write the same Phaser objects.
+    const entity = this.npcs.get(def.id);
+    if (entity) this.sdk?.registry.attach(def.id, entity);
 
     // Paint the initial pill (resting state, idle emoji). We do this once
     // the entry is in the map so renderPill can reach it by id.
@@ -1319,7 +1211,7 @@ export class WorldScene extends Phaser.Scene {
         // is fine because restingScale is reapplied here on completion.
         const entity = this.npcs.get(def.id);
         if (!entity) return;
-        entity.sprite.setScale(restingScale);
+        entity.visuals.sprite.setScale(restingScale);
         this.startChoreoFor(entity, "idle-bob");
         this.playIdleAnim(entity);
       },
@@ -1339,17 +1231,19 @@ export class WorldScene extends Phaser.Scene {
       // Real tool in flight — route to its room.
       this.lastActivityAt.set(def.id, this.time.now);
       this.walkNpcToRoom(def.id, pending.room);
-      const pathLen = this.npcPaths.get(def.id)?.length ?? 0;
-      this.time.delayedCall(pathLen * STEP_DURATION_MS + 40, () => {
-        const live = this.npcs.get(def.id);
-        if (!live) return;
-        this.startChoreoFor(live, pending.choreo);
-        this.updateOverheadPill(
-          def.id,
-          pendingTool,
-          pending.event.state,
-          false,
-        );
+      this.time.delayedCall(200, () => {
+        const waitForArrival = this.time.addEvent({
+          delay: STEP_DURATION_MS,
+          loop: true,
+          callback: () => {
+            if (this.mvHasPlan(def.id)) return;
+            waitForArrival.remove(false);
+            const live = this.npcs.get(def.id);
+            if (!live) return;
+            this.startChoreoFor(live, pending.choreo);
+            this.updateOverheadPill(def.id, pendingTool, pending.event.state, false);
+          },
+        });
       });
     } else if (dynamicTopLevel) {
       // No real tool yet — claim a free seat and walk there. Sub-
@@ -1359,10 +1253,11 @@ export class WorldScene extends Phaser.Scene {
         this.walkNpcToCell(def.id, seat.col, seat.row, {
           px: seat.px,
           py: seat.py,
+          orientation: seat.orientation,
         });
       } else if (typeof window !== "undefined") {
         console.warn(
-          `[world] no free seat for ${def.id} — ${this.occupiedSeats.size}/${this.seatCells.length} seats taken. Falling back to spawn cell.`,
+          `[world] no free seat for ${def.id} — ${this.mvOccupiedCount()}/${this.mvTotalSeats()} seats taken. Falling back to spawn cell.`,
         );
         this.walkNpcToCell(def.id, targetCol, targetRow);
       } else {
@@ -1384,17 +1279,17 @@ export class WorldScene extends Phaser.Scene {
       scene: this.time.now,
       agentId: id,
       kind: "remove",
-      fromCol: npc.col,
-      fromRow: npc.row,
-      fromX: npc.sprite.x,
-      fromY: npc.sprite.y,
+      fromCol: npc.state.col,
+      fromRow: npc.state.row,
+      fromX: npc.visuals.sprite.x,
+      fromY: npc.visuals.sprite.y,
     });
 
     // Master-hive guard: a sub-agent under a `claude-master` parent
     // outlives any single Task tool_use. Skip removal as long as the
     // parent is still in the scene; the master-hive provider issues
     // its own explicit removal when the team disperses.
-    const parentId = (npc.def as { parentId?: string }).parentId;
+    const parentId = (npc.state.def as { parentId?: string }).parentId;
     if (parentId) {
       const parent = useNpcStore.getState().dynamic[parentId];
       if (parent?.provider === "claude-master") {
@@ -1407,40 +1302,40 @@ export class WorldScene extends Phaser.Scene {
     this.stopChoreoFor(npc);
     this.despawnHelper(npc);
 
-    this.tweens.killTweensOf(npc.sprite);
-    this.tweens.killTweensOf(npc.shadow);
-    if (npc.overheadContainer) this.tweens.killTweensOf(npc.overheadContainer);
-    if (npc.indicator) this.tweens.killTweensOf(npc.indicator);
+    this.tweens.killTweensOf(npc.visuals.sprite);
+    this.tweens.killTweensOf(npc.visuals.shadow);
+    if (npc.overlays.overheadContainer) this.tweens.killTweensOf(npc.overlays.overheadContainer);
+    if (npc.overlays.indicator) this.tweens.killTweensOf(npc.overlays.indicator);
 
     // Walk-out: dynamic top-level agents (not sub-agents) walk to the
     // exterior exit before fading. Everything else fades in place.
     const isDynamic = Boolean(
-      (npc.def as { dynamic?: boolean }).dynamic,
+      (npc.state.def as { dynamic?: boolean }).dynamic,
     );
-    const hasParent = Boolean((npc.def as { parentId?: string }).parentId);
+    const hasParent = Boolean((npc.state.def as { parentId?: string }).parentId);
     const shouldWalkOut = isDynamic && !hasParent;
 
     const fadeAndDestroy = () => {
       // Re-fetch in case the NPC was already torn down.
-      if (!npc.sprite.scene) return;
+      if (!npc.visuals.sprite.scene) return;
       this.tweens.add({
-        targets: npc.sprite,
+        targets: npc.visuals.sprite,
         alpha: 0,
         scale: 0.5,
         duration: 200,
         ease: "Back.easeIn",
         onComplete: () => {
-          npc.sprite.destroy();
-          npc.shadow.destroy();
-          npc.indicator?.destroy();
-          npc.overheadContainer?.destroy();
-          npc.helperBadge?.destroy();
-          npc.transitBadge?.destroy();
+          npc.visuals.sprite.destroy();
+          npc.visuals.shadow.destroy();
+          npc.overlays.indicator?.destroy();
+          npc.overlays.overheadContainer?.destroy();
+          npc.overlays.helperBadge?.destroy();
+          npc.overlays.transitBadge?.destroy();
         },
       });
-      if (npc.overheadContainer) {
+      if (npc.overlays.overheadContainer) {
         this.tweens.add({
-          targets: npc.overheadContainer,
+          targets: npc.overlays.overheadContainer,
           alpha: 0,
           duration: 200,
           ease: "Linear",
@@ -1474,8 +1369,12 @@ export class WorldScene extends Phaser.Scene {
     this.persistedMugs.get(id)?.destroy();
     this.persistedMugs.delete(id);
     this.npcs.delete(id);
-    this.npcPaths.delete(id);
-    this.npcSeatOffset.delete(id);
+    this.mvCancelMovement(id);
+    // detach() emits "npc:removed" on the bus; MovementSystem listens
+    // and cancels any active path + releases the seat. Pair this with
+    // attach() rather than remove() because WorldScene already owns the
+    // sprite/shadow lifetimes.
+    this.sdk?.registry.detach(id);
     // World-life v2: drop the FSM entry so a later re-spawn starts
     // clean. No-op when the flag is off (worldLifeDebug is empty).
     worldLifeDebug.forget(id);
@@ -1489,10 +1388,10 @@ export class WorldScene extends Phaser.Scene {
       const { entry: entryCell } = EXTERIOR_ANCHORS;
       const targetX = entryCell.col * TILE_SIZE + TILE_SIZE / 2;
       const targetY = entryCell.row * TILE_SIZE + TILE_SIZE / 2;
-      const dist = Math.hypot(targetX - npc.sprite.x, targetY - npc.sprite.y);
+      const dist = Math.hypot(targetX - npc.visuals.sprite.x, targetY - npc.visuals.sprite.y);
       const walkMs = Math.min(2000, Math.max(400, dist * 4));
       this.tweens.add({
-        targets: npc.sprite,
+        targets: npc.visuals.sprite,
         x: targetX,
         y: targetY,
         duration: walkMs,
@@ -1500,7 +1399,7 @@ export class WorldScene extends Phaser.Scene {
         onComplete: fadeAndDestroy,
       });
       this.tweens.add({
-        targets: npc.shadow,
+        targets: npc.visuals.shadow,
         x: targetX,
         y: targetY + 7,
         duration: walkMs,
@@ -1534,9 +1433,9 @@ export class WorldScene extends Phaser.Scene {
       // Red sprite tint for 2s — visible even when zoomed out so a
       // crashed agent is obvious without watching the pill.
       try {
-        npc.sprite.setTint(0xef4444);
+        npc.visuals.sprite.setTint(0xef4444);
         this.time.delayedCall(2000, () => {
-          if (npc.sprite && npc.sprite.scene) npc.sprite.clearTint();
+          if (npc.visuals.sprite && npc.visuals.sprite.scene) npc.visuals.sprite.clearTint();
         });
       } catch {
         // sprite torn down — ignore
@@ -1553,9 +1452,9 @@ export class WorldScene extends Phaser.Scene {
    */
   private renderPill(npcId: string) {
     const npc = this.npcs.get(npcId);
-    if (!npc || !npc.overheadContainer || !npc.overheadBg) return;
-    const code = npc.overheadCodeText;
-    const emoji = npc.overheadEmojiText;
+    if (!npc || !npc.overlays.overheadContainer || !npc.overlays.overheadBg) return;
+    const code = npc.overlays.overheadCodeText;
+    const emoji = npc.overlays.overheadEmojiText;
     if (!code || !emoji) return;
 
     // Re-derive the label from the live NPC record so any post-spawn
@@ -1564,7 +1463,7 @@ export class WorldScene extends Phaser.Scene {
     // right-side roster row.
     const liveDef =
       useNpcStore.getState().dynamic[npcId] ??
-      (npc.def as { id: string; name?: string; cwd?: string });
+      (npc.state.def as { id: string; name?: string; cwd?: string });
     const expectedLabel = pillLabelFor(liveDef);
     if (code.text !== expectedLabel) code.setText(expectedLabel);
 
@@ -1580,7 +1479,7 @@ export class WorldScene extends Phaser.Scene {
         : npc.overheadBaselineEmoji ?? IDLE_EMOJI;
     emoji.setText(activeEmoji);
 
-    const bg = npc.overheadBg;
+    const bg = npc.overlays.overheadBg;
     bg.clear();
 
     // Compact mode (default): only the activity emoji is visible
@@ -1609,133 +1508,12 @@ export class WorldScene extends Phaser.Scene {
     bg.strokeRoundedRect(-w / 2, -h / 2, w, h, 3);
   }
 
-  // --------------------------------------------------------------------
-  // mouse input — drag to pan, wheel to zoom, click NPC to open dialog
-  // --------------------------------------------------------------------
-  //
-  // Coordinate systems in play:
-  //   - Phaser's pointer (pointer.x/y) is in the game canvas' internal
-  //     resolution (what we call "native" — matches g.scale.resize args).
-  //   - cam.scrollX/Y is in WORLD pixels. One world pixel == one sprite
-  //     pixel regardless of camera zoom.
-  //   - To convert a native-pixel delta into a world-pixel delta you
-  //     divide by cam.zoom.
-  //
-  // We accumulate deltas each move rather than recomputing from a
-  // mousedown origin; that keeps the drag consistent even if the canvas
-  // resizes mid-drag, and avoids snap-back if pointer events miss.
-  private setupMouseInput() {
-    const cam = this.cameras.main;
-
-    this.input.on(
-      "pointerdown",
-      (pointer: Phaser.Input.Pointer) => {
-        if (pointer.rightButtonDown()) return;
-        if (useGameStore.getState().dialog.active) return;
-        this.dragStart = {
-          x: pointer.x,
-          y: pointer.y,
-          scrollX: cam.scrollX,
-          scrollY: cam.scrollY,
-        };
-        this.isDragging = false;
-        this.pointerDownNpcId = this.npcAtViewPoint(pointer.x, pointer.y);
-      },
-      this,
-    );
-
-    this.input.on(
-      "pointermove",
-      (pointer: Phaser.Input.Pointer) => {
-        if (!this.dragStart || !pointer.isDown) return;
-        // Use accumulated delta from the move event itself (pointer.x is
-        // current; we already cached pointerdown's x/y in dragStart).
-        const dx = pointer.x - this.dragStart.x;
-        const dy = pointer.y - this.dragStart.y;
-        if (
-          !this.isDragging &&
-          Math.hypot(dx, dy) >= DRAG_THRESHOLD_PX
-        ) {
-          this.isDragging = true;
-          this.hasUserMovedCamera = true;
-          useGameStore.getState().setFollowNpc(null);
-        }
-        if (!this.isDragging) return;
-        // Pan: newScroll = initialScroll - (screen delta / zoom).
-        // setScroll clamps to cam.getBounds() automatically.
-        cam.setScroll(
-          this.dragStart.scrollX - dx / cam.zoom,
-          this.dragStart.scrollY - dy / cam.zoom,
-        );
-      },
-      this,
-    );
-
-    const endDrag = (pointer: Phaser.Input.Pointer) => {
-      const wasDragging = this.isDragging;
-      const downId = this.pointerDownNpcId;
-      this.dragStart = null;
-      this.isDragging = false;
-      this.pointerDownNpcId = null;
-      if (wasDragging) return;
-      if (pointer.rightButtonReleased()) return;
-      // Click with no drag → open the clicked NPC's dialog if still over.
-      const upId = this.npcAtViewPoint(pointer.x, pointer.y);
-      if (!downId || downId !== upId) return;
-      this.openDialogForNpc(downId);
-    };
-    this.input.on("pointerup", endDrag, this);
-    // pointerupoutside fires if the mouse is released outside the canvas
-    // mid-drag — without this the drag state would never clear.
-    this.input.on("pointerupoutside", endDrag, this);
-
-    this.input.on(
-      "wheel",
-      (
-        pointer: Phaser.Input.Pointer,
-        _objects: unknown,
-        _dx: number,
-        dy: number,
-      ) => {
-        if (useGameStore.getState().dialog.active) return;
-        if (dy === 0) return;
-        this.hasUserMovedCamera = true;
-        const oldZoom = cam.zoom;
-        const step = Math.min(0.15, Math.abs(dy) * 0.0015);
-        const direction = dy > 0 ? -1 : 1;
-        // Lower bound: zoom out cannot go past the cover-fit ratio,
-        // otherwise the map is smaller than the viewport and the user
-        // sees chrome bands. Upper bound: hard cap at ZOOM_MAX.
-        const minCover = this.mapPixelW
-          ? Math.max(cam.width / this.mapPixelW, cam.height / this.mapPixelH)
-          : ZOOM_MIN;
-        const lo = Math.max(ZOOM_MIN, minCover);
-        const nextZoom = Math.max(
-          lo,
-          Math.min(ZOOM_MAX, oldZoom * Math.exp(direction * step)),
-        );
-        if (Math.abs(nextZoom - oldZoom) < 0.0005) return;
-        // Canonical zoom-to-cursor: sample the world point under the
-        // pointer BEFORE and AFTER the zoom change, then shift scroll by
-        // the delta. getWorldPoint already accounts for Phaser's 0.5,0.5
-        // camera origin, rotation, and current scroll, so this stays
-        // correct across panel resizes and bounds clamping.
-        const before = cam.getWorldPoint(pointer.x, pointer.y);
-        cam.setZoom(nextZoom);
-        const after = cam.getWorldPoint(pointer.x, pointer.y);
-        cam.scrollX -= after.x - before.x;
-        cam.scrollY -= after.y - before.y;
-      },
-      this,
-    );
-  }
-
   private openDialogForNpc(id: string) {
     const npc = this.npcs.get(id);
     if (!npc) return;
     const activity = useAgentStore.getState().activities[id];
     const greeting = buildLiveGreeting(
-      npc.def as unknown as {
+      npc.state.def as unknown as {
         name: string;
         cwd?: string;
         greeting: string;
@@ -1743,7 +1521,7 @@ export class WorldScene extends Phaser.Scene {
       },
       activity,
     );
-    useGameStore.getState().openDialog(npc.def, greeting);
+    useGameStore.getState().openDialog(npc.state.def, greeting);
   }
 
   // --------------------------------------------------------------------
@@ -1802,22 +1580,26 @@ export class WorldScene extends Phaser.Scene {
           continue;
         }
 
-        const pathLen = this.npcPaths.get(agentId)?.length ?? 0;
-        const walkMs = pathLen * 160 + 40;
-        this.time.delayedCall(walkMs, () => {
-          const live = this.npcs.get(agentId);
-          if (!live) return;
-          this.startChoreoFor(live, act.choreo);
-          if (behaviorId === "task") {
-            const subagentType =
-              ((act.event.metadata as { subagentType?: string } | undefined)
-                ?.subagentType) ||
-              ((act.event.metadata as { input?: Record<string, unknown> } | undefined)
-                ?.input as { subagent_type?: string } | undefined)?.subagent_type;
-            this.spawnHelperFor(live, subagentType);
-          } else if (live.helper) {
-            this.despawnHelper(live);
-          }
+        const waitForWalk = this.time.addEvent({
+          delay: STEP_DURATION_MS,
+          loop: true,
+          callback: () => {
+            if (this.mvHasPlan(agentId)) return;
+            waitForWalk.remove(false);
+            const live = this.npcs.get(agentId);
+            if (!live) return;
+            this.startChoreoFor(live, act.choreo);
+            if (behaviorId === "task") {
+              const subagentType =
+                ((act.event.metadata as { subagentType?: string } | undefined)
+                  ?.subagentType) ||
+                ((act.event.metadata as { input?: Record<string, unknown> } | undefined)
+                  ?.input as { subagent_type?: string } | undefined)?.subagent_type;
+              this.spawnHelperFor(live, subagentType);
+            } else if (live.helper) {
+              this.despawnHelper(live);
+            }
+          },
         });
       }
     });
@@ -1868,8 +1650,8 @@ export class WorldScene extends Phaser.Scene {
   // --------------------------------------------------------------------
   // per-frame
   // --------------------------------------------------------------------
-  update(_time: number, _delta: number) {
-    this.tickNpcPaths();
+  update(time: number, delta: number) {
+    this.sdk?.tick(time, delta);
     this.tickChoreoDecay();
     this.tickFollowCamera();
     this.tickSpriteSeparation();
@@ -1882,7 +1664,7 @@ export class WorldScene extends Phaser.Scene {
 
   /** Visual-only push-apart so two NPCs whose sprites end up overlapping
    *  drift a few pixels in opposite directions instead of blending into
-   *  a single silhouette. We do NOT touch npc.col/npc.row — the
+   *  a single silhouette. We do NOT touch npc.state.col/npc.state.row — the
    *  pathfinder still treats them as occupying their authored cell. */
   private tickSpriteSeparation() {
     const RADIUS = 18; // smaller than a tile (32) on purpose
@@ -1890,18 +1672,18 @@ export class WorldScene extends Phaser.Scene {
     const PUSH_PER_FRAME = 0.6;
     const MAX_OFFSET_SQ = 14 * 14;
     for (const [aId, a] of this.npcs) {
-      if (!a.sprite || !a.sprite.scene) continue;
+      if (!a.visuals.sprite || !a.visuals.sprite.scene) continue;
       // Skip mid-step tweens (the walk owns the position) and seated
       // agents (they occupy a fixed pixel offset on the chair).
-      if (a.tween) continue;
-      if (this.seatByNpc.has(aId)) continue;
+      if (a.visuals.tween) continue;
+      if (this.mvIsSeated(aId)) continue;
       let dx = 0;
       let dy = 0;
       for (const [bId, b] of this.npcs) {
         if (bId === aId) continue;
-        if (!b.sprite || !b.sprite.scene) continue;
-        const distX = a.sprite.x - b.sprite.x;
-        const distY = a.sprite.y - b.sprite.y;
+        if (!b.visuals.sprite || !b.visuals.sprite.scene) continue;
+        const distX = a.visuals.sprite.x - b.visuals.sprite.x;
+        const distY = a.visuals.sprite.y - b.visuals.sprite.y;
         const distSq = distX * distX + distY * distY;
         if (distSq >= RADIUS_SQ) continue;
         // Squared-distance early-out keeps the inner loop sqrt-free.
@@ -1921,11 +1703,11 @@ export class WorldScene extends Phaser.Scene {
         dy *= inv;
       }
       // Cap total drift from the canonical tile center so a sprite
-      // never reads as being in a different tile than npc.col/npc.row.
-      const centerX = a.col * TILE_SIZE + TILE_SIZE / 2;
-      const centerY = a.row * TILE_SIZE + TILE_SIZE / 2;
-      let offX = a.sprite.x + dx - centerX;
-      let offY = a.sprite.y + dy - centerY;
+      // never reads as being in a different tile than npc.state.col/npc.state.row.
+      const centerX = a.state.col * TILE_SIZE + TILE_SIZE / 2;
+      const centerY = a.state.row * TILE_SIZE + TILE_SIZE / 2;
+      let offX = a.visuals.sprite.x + dx - centerX;
+      let offY = a.visuals.sprite.y + dy - centerY;
       const offSq = offX * offX + offY * offY;
       if (offSq > MAX_OFFSET_SQ) {
         const scale = Math.sqrt(MAX_OFFSET_SQ / offSq);
@@ -1934,10 +1716,10 @@ export class WorldScene extends Phaser.Scene {
       }
       const nextX = centerX + offX;
       const nextY = centerY + offY;
-      const sepFromX = a.sprite.x;
-      const sepFromY = a.sprite.y;
-      a.sprite.setPosition(nextX, nextY);
-      a.shadow.setPosition(nextX, nextY + 7);
+      const sepFromX = a.visuals.sprite.x;
+      const sepFromY = a.visuals.sprite.y;
+      a.visuals.sprite.setPosition(nextX, nextY);
+      a.visuals.shadow.setPosition(nextX, nextY + 7);
       // Only log meaningful nudges so we don't spam the buffer at
       // 60 fps with sub-pixel jitter.
       const dPx = Math.hypot(nextX - sepFromX, nextY - sepFromY);
@@ -1982,9 +1764,9 @@ export class WorldScene extends Phaser.Scene {
     // NPC anchor cells — bright green dot at the (col,row) tile center
     // the rest of the system uses for pathfinding and pill placement.
     for (const [, npc] of this.npcs) {
-      if (!npc.sprite || !npc.sprite.scene) continue;
-      const cx = npc.col * TILE_SIZE + TILE_SIZE / 2;
-      const cy = npc.row * TILE_SIZE + TILE_SIZE / 2;
+      if (!npc.visuals.sprite || !npc.visuals.sprite.scene) continue;
+      const cx = npc.state.col * TILE_SIZE + TILE_SIZE / 2;
+      const cy = npc.state.row * TILE_SIZE + TILE_SIZE / 2;
       gfx.fillStyle(0x22c55e, 1);
       gfx.fillCircle(cx, cy, 4);
       gfx.lineStyle(1, 0x000000, 0.8);
@@ -1995,8 +1777,8 @@ export class WorldScene extends Phaser.Scene {
     // toward the desk the seated agent will face, with a chevron head.
     const ARROW_LEN = 12;
     const HEAD = 4;
-    for (const seat of this.seatCells) {
-      const facing = this.deskFacingFor(seat.col, seat.row);
+    for (const seat of this.mvAllSeatCells()) {
+      const facing = seat.orientation ?? this.mvDeskFacingFor(seat.col, seat.row);
       const sx = seat.px;
       const sy = seat.py;
       const dx = facing === "left" ? -1 : facing === "right" ? 1 : 0;
@@ -2027,28 +1809,28 @@ export class WorldScene extends Phaser.Scene {
    *  Also decays the brief ❌ error flash back to the baseline emoji. */
   private tickOverheadPills() {
     for (const [id, npc] of this.npcs) {
-      if (!npc.overheadContainer || !npc.sprite.scene) continue;
+      if (!npc.overlays.overheadContainer || !npc.visuals.sprite.scene) continue;
       // Pin to sprite center; `-18` offsets above the head. NPCs use
       // origin (0.5, 1) so sprite.y is the bottom — subtract half a tile
       // to reach the head, then 18 more to clear the sprite.
-      npc.overheadContainer.setPosition(
-        npc.sprite.x,
-        npc.sprite.y - TILE_SIZE - 6,
+      npc.overlays.overheadContainer.setPosition(
+        npc.visuals.sprite.x,
+        npc.visuals.sprite.y - TILE_SIZE - 6,
       );
       // Depth has to track row-ish so sprites in lower rows draw on top
       // of higher NPCs' pills. Using sprite.y is a fine proxy.
-      npc.overheadContainer.setDepth(1600 + npc.sprite.y);
+      npc.overlays.overheadContainer.setDepth(1600 + npc.visuals.sprite.y);
 
       // Pin the HELPER badge above the pill (sub-agents only).
       // Sits one row above the pill so it doesn't fight the thinking
       // badge for vertical space. Clamp to a minimum y so a sub-agent
       // spawned near the top edge of the map doesn't end up with the
       // chip stuck above the camera viewport.
-      if (npc.helperBadge) {
-        const desiredY = npc.sprite.y - TILE_SIZE - 36;
+      if (npc.overlays.helperBadge) {
+        const desiredY = npc.visuals.sprite.y - TILE_SIZE - 36;
         const minY = 12;
-        npc.helperBadge.setPosition(npc.sprite.x, Math.max(minY, desiredY));
-        npc.helperBadge.setDepth(1599 + npc.sprite.y);
+        npc.overlays.helperBadge.setPosition(npc.visuals.sprite.x, Math.max(minY, desiredY));
+        npc.overlays.helperBadge.setDepth(1599 + npc.visuals.sprite.y);
       }
 
       // Decay any expired transient overheads (error flash, prompt
@@ -2080,13 +1862,13 @@ export class WorldScene extends Phaser.Scene {
    */
   private tickTransitBadges() {
     for (const [, npc] of this.npcs) {
-      if (!npc.sprite || !npc.sprite.scene) continue;
+      if (!npc.visuals.sprite || !npc.visuals.sprite.scene) continue;
       const target = npc.transitTarget;
 
       if (!target) {
-        if (npc.transitBadge) {
-          npc.transitBadge.destroy();
-          npc.transitBadge = undefined;
+        if (npc.overlays.transitBadge) {
+          npc.overlays.transitBadge.destroy();
+          npc.overlays.transitBadge = undefined;
           npc.transitText = undefined;
         }
         continue;
@@ -2098,9 +1880,9 @@ export class WorldScene extends Phaser.Scene {
       let text = npc.transitText;
       if (text === undefined || npc.transitText !== targetKey) {
         text = `🚶 → ${roomById(target)?.label ?? target}`;
-        if (!npc.transitBadge) {
-          npc.transitBadge = this.add
-            .text(npc.sprite.x, npc.sprite.y - TILE_SIZE - 22, text, {
+        if (!npc.overlays.transitBadge) {
+          npc.overlays.transitBadge = this.add
+            .text(npc.visuals.sprite.x, npc.visuals.sprite.y - TILE_SIZE - 22, text, {
               fontFamily: '"Press Start 2P", monospace',
               fontSize: "8px",
               color: "#6ee7b7",
@@ -2111,17 +1893,17 @@ export class WorldScene extends Phaser.Scene {
             .setOrigin(0.5, 1)
             .setAlpha(0.95);
         } else {
-          npc.transitBadge.setText(text);
+          npc.overlays.transitBadge.setText(text);
         }
         // Cache by RoomId so the same target doesn't keep re-rendering.
         npc.transitText = targetKey;
       }
-      if (npc.transitBadge) {
-        npc.transitBadge.setPosition(
-          npc.sprite.x,
-          npc.sprite.y - TILE_SIZE - 22,
+      if (npc.overlays.transitBadge) {
+        npc.overlays.transitBadge.setPosition(
+          npc.visuals.sprite.x,
+          npc.visuals.sprite.y - TILE_SIZE - 22,
         );
-        npc.transitBadge.setDepth(1599 + npc.sprite.y);
+        npc.overlays.transitBadge.setDepth(1599 + npc.visuals.sprite.y);
       }
     }
   }
@@ -2135,13 +1917,13 @@ export class WorldScene extends Phaser.Scene {
     const followId = useGameStore.getState().followNpcId;
     if (!followId) return;
     const npc = this.npcs.get(followId);
-    if (!npc || !npc.sprite || !npc.sprite.scene) return;
+    if (!npc || !npc.visuals.sprite || !npc.visuals.sprite.scene) return;
     const now = this.time.now;
     if (now - this.lastFollowPanAt < 500) return;
     this.lastFollowPanAt = now;
     this.cameras.main.pan(
-      npc.sprite.x,
-      npc.sprite.y,
+      npc.visuals.sprite.x,
+      npc.visuals.sprite.y,
       400,
       "Sine.easeInOut",
       true,
@@ -2162,10 +1944,10 @@ export class WorldScene extends Phaser.Scene {
     const parent = this.npcs.get(parentId);
     if (!child || !parent) return;
     const flash = this.add.graphics().setDepth(951);
-    const px = parent.sprite.x;
-    const py = parent.sprite.y;
-    const cx = child.sprite.x;
-    const cy = child.sprite.y;
+    const px = parent.visuals.sprite.x;
+    const py = parent.visuals.sprite.y;
+    const cx = child.visuals.sprite.x;
+    const cy = child.visuals.sprite.y;
     flash.lineStyle(3, 0x6ee7b7, 1);
     flash.lineBetween(px, py, cx, cy);
     this.tweens.add({
@@ -2181,7 +1963,7 @@ export class WorldScene extends Phaser.Scene {
     if (!this.tetherGfx) return;
     this.tetherGfx.clear();
     for (const npc of this.npcs.values()) {
-      const pid = (npc.def as { parentId?: string }).parentId;
+      const pid = (npc.state.def as { parentId?: string }).parentId;
       if (!pid) continue;
       const parent = this.npcs.get(pid);
       if (!parent) continue;
@@ -2193,10 +1975,10 @@ export class WorldScene extends Phaser.Scene {
       for (let i = 0; i < segments; i++) {
         const t1 = (i + 0.1) / segments;
         const t2 = (i + 0.5) / segments;
-        const x1 = Phaser.Math.Linear(parent.sprite.x, npc.sprite.x, t1);
-        const y1 = Phaser.Math.Linear(parent.sprite.y, npc.sprite.y, t1);
-        const x2 = Phaser.Math.Linear(parent.sprite.x, npc.sprite.x, t2);
-        const y2 = Phaser.Math.Linear(parent.sprite.y, npc.sprite.y, t2);
+        const x1 = Phaser.Math.Linear(parent.visuals.sprite.x, npc.visuals.sprite.x, t1);
+        const y1 = Phaser.Math.Linear(parent.visuals.sprite.y, npc.visuals.sprite.y, t1);
+        const x2 = Phaser.Math.Linear(parent.visuals.sprite.x, npc.visuals.sprite.x, t2);
+        const y2 = Phaser.Math.Linear(parent.visuals.sprite.y, npc.visuals.sprite.y, t2);
         this.tetherGfx.lineBetween(x1, y1, x2, y2);
       }
     }
@@ -2225,230 +2007,37 @@ export class WorldScene extends Phaser.Scene {
   walkNpcToRoom(npcId: string, room: RoomId) {
     const npc = this.npcs.get(npcId);
     if (!npc) return;
-    const anchor = ROOM_ANCHORS[room];
-    logAgent({
-      ts: Date.now(),
-      scene: this.time.now,
-      agentId: npcId,
-      kind: "summon",
-      fromCol: npc.col,
-      fromRow: npc.row,
-      toCol: anchor.col,
-      toRow: anchor.row,
-      note: `route to room=${room}`,
-    });
-
-    // Find a free tile near the anchor — anchor itself or adjacent
-    let target = { col: anchor.col, row: anchor.row };
-    let targetFound =
-      this.isWalkableHere(target.col, target.row) &&
-      !this.isEntityAt(target.col, target.row, npcId);
-    if (!targetFound) {
-      const candidates = [
-        [anchor.col + 1, anchor.row],
-        [anchor.col - 1, anchor.row],
-        [anchor.col, anchor.row + 1],
-        [anchor.col, anchor.row - 1],
-      ];
-      for (const [c, r] of candidates) {
-        if (this.isWalkableHere(c, r) && !this.isEntityAt(c, r, npcId)) {
-          target = { col: c, row: r };
-          targetFound = true;
-          break;
-        }
-      }
-    }
-    // Anchor cluster fully blocked — scan the whole room rect for any
-    // walkable, unoccupied cell. Without this, a crowded room silently
-    // refuses new arrivals and they freeze in the corridor.
-    if (!targetFound) {
-      const region = getRoomRegions().find((r) => r.id === room);
-      if (region) {
-        outer: for (let r = region.rowMin; r <= region.rowMax; r++) {
-          for (let c = region.colMin; c <= region.colMax; c++) {
-            if (this.isWalkableHere(c, r) && !this.isEntityAt(c, r, npcId)) {
-              target = { col: c, row: r };
-              targetFound = true;
-              break outer;
-            }
-          }
-        }
-      }
-      if (!targetFound) {
-        console.warn(
-          `[walkNpcToRoom] room "${room}" is full — ${npcId} stays put`,
-        );
+    // RoomId "desk" is the catch-all for ~12 of 15 agent states (idle,
+    // thinking, coding, debugging, calling_tool, …). Routing every
+    // desk-bound agent to ROOM_ANCHORS.desk would funnel them all to
+    // the single tile mapped from the .tmj `DataCenter` rect — they'd
+    // pile up there and never reach their home desks until the cinema
+    // idle loop fired ~60s later. Short-circuit straight to the home
+    // seat so each agent reads as "back at their own workstation."
+    if (room === "desk") {
+      const seat = this.claimFreeSeat(npcId);
+      if (seat) {
+        this.walkNpcToCell(npcId, seat.col, seat.row, {
+          px: seat.px,
+          py: seat.py,
+          orientation: seat.orientation,
+        });
         return;
       }
+      // No home seat available (pool exhausted) — fall through to the
+      // DataCenter anchor as a last resort so they at least move.
     }
-
-    const blocked: Array<{ col: number; row: number }> = [];
-    for (const other of this.npcs.values()) {
-      if (other.def.id === npcId) continue;
-      blocked.push({ col: other.col, row: other.row });
-    }
-    const path = bfs(npc.col, npc.row, target.col, target.row, { blocked });
-    if (path.length <= 1) return;
-    this.npcPaths.set(npcId, path.slice(1));
-    // Stash the destination room on the entity so the transit badge
-    // ("→ Library") can render until the path drains.
-    npc.transitTarget = room;
+    this.sdk?.movement.walkToRoom(npcId, room);
   }
 
   private isEntityAt(col: number, row: number, exceptNpcId?: string): boolean {
     for (const n of this.npcs.values()) {
-      if (n.def.id === exceptNpcId) continue;
-      if (n.col === col && n.row === row) return true;
+      if (n.state.def.id === exceptNpcId) continue;
+      if (n.state.col === col && n.state.row === row) return true;
     }
     return false;
   }
 
-  private tickNpcPaths() {
-    for (const [id, path] of this.npcPaths) {
-      const npc = this.npcs.get(id);
-      // Defensive: if the npc entry is gone, or its sprite was destroyed
-      // (e.g. by a mid-flight scene restart or a late tween onComplete
-      // that ran after removeNpcEntity), drop the path. `sprite.active`
-      // is Phaser's "is this game object still usable" flag.
-      if (!npc || !npc.sprite || !npc.sprite.scene) {
-        this.npcPaths.delete(id);
-        continue;
-      }
-      if (npc.tween) continue; // mid-step
-      const next = path.shift();
-      if (!next) {
-        this.npcPaths.delete(id);
-        npc.transitTarget = undefined;
-        try {
-          // Drop into the per-character idle loop so the agent looks
-          // alive at rest instead of holding a single frame.
-          this.playIdleAnim(npc);
-        } catch {
-          // sprite torn down while we were iterating — ignore
-        }
-        continue;
-      }
-      // Path could have become invalid if the player stepped into it — retry later
-      if (this.isEntityAt(next.col, next.row, id)) {
-        path.unshift(next);
-        logAgent({
-          ts: Date.now(),
-          scene: this.time.now,
-          agentId: id,
-          kind: "walk-step-skip",
-          fromCol: npc.col,
-          fromRow: npc.row,
-          toCol: next.col,
-          toRow: next.row,
-          note: "tile occupied; will retry",
-        });
-        continue;
-      }
-      const dc = next.col - npc.col;
-      const dr = next.row - npc.row;
-      const dir: Direction = dc > 0 ? "right" : dc < 0 ? "left" : dr > 0 ? "down" : "up";
-      npc.facing = dir;
-      npc.sprite.play(`${npc.animKey}-walk-${dir}`, true);
-      // On the LAST step of a seat-bound path, prefer the seat's
-      // authored pixel center (via npcSeatOffset). Cleared on arrival.
-      const isLastStep = path.length === 0;
-      const offset = isLastStep ? this.npcSeatOffset.get(id) : undefined;
-      const targetX = offset
-        ? offset.px
-        : next.col * TILE_SIZE + TILE_SIZE / 2;
-      const targetY = offset
-        ? offset.py
-        : next.row * TILE_SIZE + TILE_SIZE / 2;
-      const stepFromX = npc.sprite.x;
-      const stepFromY = npc.sprite.y;
-      const stepFromCol = npc.col;
-      const stepFromRow = npc.row;
-      logAgent({
-        ts: Date.now(),
-        scene: this.time.now,
-        agentId: id,
-        kind: "walk-step-start",
-        fromCol: stepFromCol,
-        fromRow: stepFromRow,
-        toCol: next.col,
-        toRow: next.row,
-        fromX: stepFromX,
-        fromY: stepFromY,
-        toX: targetX,
-        toY: targetY,
-        note: offset ? `seat-offset px=(${offset.px},${offset.py})` : undefined,
-      });
-      npc.tween = this.tweens.add({
-        targets: npc.sprite,
-        x: targetX,
-        y: targetY,
-        duration: STEP_DURATION_MS,
-        ease: "Linear",
-        onComplete: () => {
-          npc.col = next.col;
-          npc.row = next.row;
-          npc.sprite.setDepth(1000 + next.row);
-          npc.tween = undefined;
-          logAgent({
-            ts: Date.now(),
-            scene: this.time.now,
-            agentId: id,
-            kind: "walk-step-end",
-            fromCol: stepFromCol,
-            fromRow: stepFromRow,
-            toCol: next.col,
-            toRow: next.row,
-            toX: npc.sprite.x,
-            toY: npc.sprite.y,
-          });
-          if (offset) {
-            // Face the nearest desk so seated agents look at their
-            // workstation instead of the last step's incoming axis.
-            const facing = this.deskFacingFor(next.col, next.row);
-            npc.facing = facing;
-            try {
-              npc.sprite.stop();
-              // Use the idle sheet's first frame in the chosen direction.
-              // The dedicated sit sheet is single-direction so it can't
-              // express "facing the desk"; the idle sheet has all 4.
-              npc.sprite.setTexture(npc.idleAnimKey, IDLE_FRAME[facing][0]);
-            } catch {
-              // sprite torn down mid-tween — ignore
-            }
-            this.npcSeatOffset.delete(id);
-            // Sit-down choreo: brief settle + breathing yoyo so the
-            // seated pose reads as intentional rather than frozen.
-            this.startChoreoFor(npc, "sit-down");
-          }
-        },
-      });
-      this.tweens.add({
-        targets: npc.shadow,
-        x: targetX,
-        y: targetY + 7,
-        duration: STEP_DURATION_MS,
-        ease: "Linear",
-      });
-      if (npc.indicator) {
-        this.tweens.add({
-          targets: npc.indicator,
-          x: targetX,
-          y: targetY - 14,
-          duration: STEP_DURATION_MS,
-          ease: "Linear",
-        });
-      }
-      if (npc.overheadContainer) {
-        this.tweens.add({
-          targets: npc.overheadContainer,
-          x: targetX,
-          y: targetY - 20,
-          duration: STEP_DURATION_MS,
-          ease: "Linear",
-        });
-      }
-    }
-  }
 
   // --------------------------------------------------------------------
   // misc
@@ -2469,7 +2058,7 @@ export class WorldScene extends Phaser.Scene {
    * choreo if any so we never stack tweens.
    */
   private startChoreoFor(
-    entity: Entity & { def: NpcDef; tween?: Phaser.Tweens.Tween },
+    entity: Entity,
     kind: ChoreoKind,
   ) {
     if (entity.choreo) {
@@ -2486,13 +2075,13 @@ export class WorldScene extends Phaser.Scene {
       // choreo.stop() resets scale to (1, 1). Re-apply our resting scale
       // so sub-agents stay at 0.8 between choreos.
       try {
-        entity.sprite.setScale(entity.restingScale);
+        entity.visuals.sprite.setScale(entity.state.restingScale);
       } catch {
         // ignore
       }
       entity.choreo = undefined;
     }
-    const handle = startChoreo(this, { sprite: entity.sprite }, kind);
+    const handle = startChoreo(this, { sprite: entity.visuals.sprite }, kind, entity.state.facing);
     entity.choreo = { kind, handle, startedAt: this.time.now };
   }
 
@@ -2504,7 +2093,7 @@ export class WorldScene extends Phaser.Scene {
       // ignore
     }
     try {
-      entity.sprite.setScale(entity.restingScale);
+      entity.visuals.sprite.setScale(entity.state.restingScale);
     } catch {
       // ignore
     }
@@ -2517,7 +2106,7 @@ export class WorldScene extends Phaser.Scene {
    * removeNpcEntity.
    */
   private spawnHelperFor(
-    entity: Entity & { def: NpcDef },
+    entity: Entity,
     subagentType: string | undefined,
   ) {
     // If there's already a helper, just leave it; the dispose will happen on
@@ -2529,7 +2118,7 @@ export class WorldScene extends Phaser.Scene {
     // matches this entity). Otherwise we'd render two visual children
     // for one Task call — the helper sprite plus the real NPC.
     for (const other of this.npcs.values()) {
-      if ((other.def as { parentId?: string }).parentId === entity.def.id) {
+      if ((other.state.def as { parentId?: string }).parentId === entity.state.def.id) {
         return;
       }
     }
@@ -2540,7 +2129,7 @@ export class WorldScene extends Phaser.Scene {
     const tintSeed = (subagentType ?? "default")
       .split("")
       .reduce((h, c) => (h * 31 + c.charCodeAt(0)) | 0, 0);
-    const parentChar = this.characterForNpc(entity.def.id);
+    const parentChar = this.characterForNpc(entity.state.def.id);
     const candidates = MODERN_CHARS.filter((c) => c !== parentChar);
     const helperChar =
       candidates[Math.abs(tintSeed) % candidates.length] ?? parentChar;
@@ -2548,9 +2137,9 @@ export class WorldScene extends Phaser.Scene {
     this.ensureAnimsForSheet(helperKey);
 
     // Spawn 1 tile behind the parent's facing direction.
-    const [dc, dr] = dirDelta(oppositeDir(entity.facing));
-    const spawnPx = entity.sprite.x + dc * TILE_SIZE;
-    const spawnPy = entity.sprite.y + dr * TILE_SIZE;
+    const [dc, dr] = dirDelta(oppositeDir(entity.state.facing));
+    const spawnPx = entity.visuals.sprite.x + dc * TILE_SIZE;
+    const spawnPy = entity.visuals.sprite.y + dr * TILE_SIZE;
 
     const sprite = this.add
       .sprite(spawnPx, spawnPy, helperKey, 0)
@@ -2558,7 +2147,7 @@ export class WorldScene extends Phaser.Scene {
       // as a subordinate. Modern sprites are 16w × 32h native, so this
       // is the same proportional reduction that the old 1.5/2 was.
       .setScale(0.75)
-      .setDepth(entity.sprite.depth - 1);
+      .setDepth(entity.visuals.sprite.depth - 1);
 
     // Floating emoji above the helper — scroll.
     const emojiText = this.add
@@ -2582,9 +2171,9 @@ export class WorldScene extends Phaser.Scene {
     const followUpdate = () => {
       if (!sprite.scene) return;
       // Follow the parent with a 1-tile offset behind its facing.
-      const [ddc, ddr] = dirDelta(oppositeDir(entity.facing));
-      const tx = entity.sprite.x + ddc * TILE_SIZE;
-      const ty = entity.sprite.y + ddr * TILE_SIZE;
+      const [ddc, ddr] = dirDelta(oppositeDir(entity.state.facing));
+      const tx = entity.visuals.sprite.x + ddc * TILE_SIZE;
+      const ty = entity.visuals.sprite.y + ddr * TILE_SIZE;
       // Smooth follow so it tweens naturally.
       sprite.x = Phaser.Math.Linear(sprite.x, tx, 0.1);
       sprite.y = Phaser.Math.Linear(sprite.y, ty, 0.1);
@@ -2627,7 +2216,7 @@ export class WorldScene extends Phaser.Scene {
     entity.helper = { sprite, emojiText, followUpdate, destroy };
   }
 
-  private despawnHelper(entity: Entity & { def?: NpcDef }) {
+  private despawnHelper(entity: Entity) {
     if (!entity.helper) return;
     try {
       entity.helper.destroy();
@@ -2670,18 +2259,18 @@ export class WorldScene extends Phaser.Scene {
         }
         // Stage 3: idle micro-animations controller.
         this.idleAnimCtrl = new IdleAnimController(this, {
-          spriteFor: (id) => this.npcs.get(id)?.sprite,
-          isSeated: (id) => this.seatByNpc.has(id),
+          spriteFor: (id) => this.npcs.get(id)?.visuals.sprite,
+          isSeated: (id) => this.mvIsSeated(id),
           roomFor: (id) => {
             const npc = this.npcs.get(id);
             if (!npc) return null;
-            return roomIdForCell(npc.col, npc.row);
+            return roomIdForCell(npc.state.col, npc.state.row);
           },
           isSuspended: (id) => {
             const npc = this.npcs.get(id);
             if (!npc) return true;
             // Suspended when: walking, has active choreo, in dialog, or selected
-            if (this.npcPaths.has(id)) return true;
+            if (this.mvHasPlan(id)) return true;
             if (npc.choreo) return true;
             const state = worldLifeDebug.states[id];
             if (state === "IN_DIALOG" || state === "SUMMONED" || state === "TRAVELING" || state === "ACTIVE_TOOL") return true;
@@ -2758,17 +2347,17 @@ export class WorldScene extends Phaser.Scene {
       // Re-initialize idle anims if worldLifeV2 is on
       if (this.worldLifeTimer && !this.idleAnimCtrl) {
         this.idleAnimCtrl = new IdleAnimController(this, {
-          spriteFor: (id) => this.npcs.get(id)?.sprite,
-          isSeated: (id) => this.seatByNpc.has(id),
+          spriteFor: (id) => this.npcs.get(id)?.visuals.sprite,
+          isSeated: (id) => this.mvIsSeated(id),
           roomFor: (id) => {
             const npc = this.npcs.get(id);
             if (!npc) return null;
-            return roomIdForCell(npc.col, npc.row);
+            return roomIdForCell(npc.state.col, npc.state.row);
           },
           isSuspended: (id) => {
             const npc = this.npcs.get(id);
             if (!npc) return true;
-            if (this.npcPaths.has(id)) return true;
+            if (this.mvHasPlan(id)) return true;
             if (npc.choreo) return true;
             const state = worldLifeDebug.states[id];
             if (state === "IN_DIALOG" || state === "SUMMONED" || state === "TRAVELING" || state === "ACTIVE_TOOL") return true;
@@ -2866,7 +2455,7 @@ export class WorldScene extends Phaser.Scene {
           this.persistedMugs.delete(id);
         }
       } else if (cur === "ROOM_IDLE") {
-        const room = roomIdForCell(npc.col, npc.row);
+        const room = roomIdForCell(npc.state.col, npc.state.row);
 
         if (!calm) {
           // --- Stage 2: signature roll (lounge only) ---
@@ -2956,7 +2545,7 @@ export class WorldScene extends Phaser.Scene {
 
           // --- Stage 5: chit-chat roll ---
           if (this.chatEngine && !this.chatEngine.isAtGlobalCap()) {
-            const chatRoom = roomIdForCell(npc.col, npc.row);
+            const chatRoom = roomIdForCell(npc.state.col, npc.state.row);
             if (chatRoom) {
               const chatProb = chatProbForRoom(chatRoom);
               if (chatProb > 0 && this.chatEngine.canChat(id, now)) {
@@ -2964,12 +2553,12 @@ export class WorldScene extends Phaser.Scene {
                   if (otherId === id) continue;
                   const otherState = worldLifeDebug.states[otherId];
                   if (otherState !== "ROOM_IDLE") continue;
-                  const otherRoom = roomIdForCell(otherNpc.col, otherNpc.row);
+                  const otherRoom = roomIdForCell(otherNpc.state.col, otherNpc.state.row);
                   if (otherRoom !== chatRoom) continue;
                   if (!this.chatEngine.canChat(otherId, now)) continue;
                   // Proximity check: <= 120 px
-                  const dx = npc.sprite.x - otherNpc.sprite.x;
-                  const dy = npc.sprite.y - otherNpc.sprite.y;
+                  const dx = npc.visuals.sprite.x - otherNpc.visuals.sprite.x;
+                  const dy = npc.visuals.sprite.y - otherNpc.visuals.sprite.y;
                   const dist = Math.sqrt(dx * dx + dy * dy);
                   if (dist > 120) continue;
                   // Both roll against chatProb
@@ -3004,7 +2593,7 @@ export class WorldScene extends Phaser.Scene {
           );
         }
         // If the NPC has left the lounge (e.g. walked away), soft-stop
-        const room = roomIdForCell(npc.col, npc.row);
+        const room = roomIdForCell(npc.state.col, npc.state.row);
         if (room !== "lounge" && sigHandle && !sigHandle.done) {
           const mugPersist = sigHandle.softStop();
           this.loungeSignatures.delete(id);
@@ -3050,7 +2639,7 @@ export class WorldScene extends Phaser.Scene {
    *  callbacks that bridge back into the scene's pathfinding. */
   private startLoungeSignatureFor(
     npcId: string,
-    npc: Entity & { def: NpcDef; tween?: Phaser.Tweens.Tween },
+    npc: Entity,
   ) {
     // Resolve the lounge anchor
     const anchor = ROOM_ANCHORS["lounge"];
@@ -3063,7 +2652,7 @@ export class WorldScene extends Phaser.Scene {
         const entity = this.npcs.get(npcId);
         if (!entity) { reject(); return; }
         // If already at target, resolve immediately
-        if (entity.col === col && entity.row === row) { resolve(); return; }
+        if (entity.state.col === col && entity.state.row === row) { resolve(); return; }
         this.walkNpcToCell(npcId, col, row);
         // Poll for arrival (path drains) — check every step duration
         const check = this.time.addEvent({
@@ -3072,8 +2661,7 @@ export class WorldScene extends Phaser.Scene {
           callback: () => {
             const e = this.npcs.get(npcId);
             if (!e) { check.remove(false); reject(); return; }
-            const path = this.npcPaths.get(npcId);
-            if (!path || path.length === 0) {
+            if (!this.mvHasPlan(npcId)) {
               check.remove(false);
               resolve();
             }
@@ -3084,12 +2672,12 @@ export class WorldScene extends Phaser.Scene {
 
     const getPos = () => {
       const e = this.npcs.get(npcId);
-      return e ? { col: e.col, row: e.row } : { col: anchor.col, row: anchor.row };
+      return e ? { col: e.state.col, row: e.state.row } : { col: anchor.col, row: anchor.row };
     };
 
     const handle = startLoungeSignature(
       this,
-      npc.sprite,
+      npc.visuals.sprite,
       anchor.col,
       anchor.row,
       { walkTo, getPos },
@@ -3101,14 +2689,14 @@ export class WorldScene extends Phaser.Scene {
    *  pathfinding/position into the micro-trip visual module. */
   private startMicroTripFor(
     npcId: string,
-    npc: Entity & { def: NpcDef; tween?: Phaser.Tweens.Tween },
+    npc: Entity,
     options: { isBreak: boolean },
   ) {
     const walkTo = (col: number, row: number): Promise<void> => {
       return new Promise<void>((resolve, reject) => {
         const entity = this.npcs.get(npcId);
         if (!entity) { reject(); return; }
-        if (entity.col === col && entity.row === row) { resolve(); return; }
+        if (entity.state.col === col && entity.state.row === row) { resolve(); return; }
         this.walkNpcToCell(npcId, col, row);
         const check = this.time.addEvent({
           delay: STEP_DURATION_MS,
@@ -3116,8 +2704,7 @@ export class WorldScene extends Phaser.Scene {
           callback: () => {
             const e = this.npcs.get(npcId);
             if (!e) { check.remove(false); reject(); return; }
-            const path = this.npcPaths.get(npcId);
-            if (!path || path.length === 0) {
+            if (!this.mvHasPlan(npcId)) {
               check.remove(false);
               resolve();
             }
@@ -3128,16 +2715,16 @@ export class WorldScene extends Phaser.Scene {
 
     const getPos = () => {
       const e = this.npcs.get(npcId);
-      return e ? { col: e.col, row: e.row } : { col: 0, row: 0 };
+      return e ? { col: e.state.col, row: e.state.row } : { col: 0, row: 0 };
     };
 
     const getHomeSeat = () => {
-      const seat = this.seatByNpc.get(npcId);
+      const seat = this.mvGetSeat(npcId);
       return seat ? { col: seat.col, row: seat.row } : getPos();
     };
 
     const getAdjacentRooms = () => {
-      const currentRoom = roomIdForCell(npc.col, npc.row);
+      const currentRoom = roomIdForCell(npc.state.col, npc.state.row);
       if (!currentRoom) return [];
       const regions = getRoomRegions();
       const current = regions.find(r => r.id === currentRoom);
@@ -3158,7 +2745,7 @@ export class WorldScene extends Phaser.Scene {
         .filter((x): x is { roomId: string; col: number; row: number } => x !== null);
     };
 
-    const tripHandle = startMicroTrip(this, npc.sprite, { walkTo, getPos, getHomeSeat, getAdjacentRooms }, options);
+    const tripHandle = startMicroTrip(this, npc.visuals.sprite, { walkTo, getPos, getHomeSeat, getAdjacentRooms }, options);
     this.microTrips.set(npcId, tripHandle);
   }
 
@@ -3200,15 +2787,15 @@ export class WorldScene extends Phaser.Scene {
     if (npc && partner) {
       // Destroy any existing bubble for this speaker
       this.activeBubbles.get(speakerId)?.destroy();
-      const side = bubbleSide(npc.sprite.x, partner.sprite.x);
-      const handle = showChatBubble(this, { emoji: result.emoji, sprite: npc.sprite, side });
+      const side = bubbleSide(npc.visuals.sprite.x, partner.visuals.sprite.x);
+      const handle = showChatBubble(this, { emoji: result.emoji, sprite: npc.visuals.sprite, side });
       this.activeBubbles.set(speakerId, handle);
 
       // If "both", also show on partner
       if (result.speaker === "both") {
         this.activeBubbles.get(partnerId)?.destroy();
-        const partnerSide = bubbleSide(partner.sprite.x, npc.sprite.x);
-        const partnerHandle = showChatBubble(this, { emoji: result.emoji, sprite: partner.sprite, side: partnerSide });
+        const partnerSide = bubbleSide(partner.visuals.sprite.x, npc.visuals.sprite.x);
+        const partnerHandle = showChatBubble(this, { emoji: result.emoji, sprite: partner.visuals.sprite, side: partnerSide });
         this.activeBubbles.set(partnerId, partnerHandle);
       }
     }
@@ -3225,7 +2812,7 @@ export class WorldScene extends Phaser.Scene {
     const npc = this.npcs.get(npcId);
     if (!npc) return;
     this.activeBubbles.get(npcId)?.destroy();
-    const handle = showChatBubble(this, { emoji: "\u{1F44B}", sprite: npc.sprite, side: "right" });
+    const handle = showChatBubble(this, { emoji: "\u{1F44B}", sprite: npc.visuals.sprite, side: "right" });
     this.activeBubbles.set(npcId, handle);
   }
 
